@@ -5,11 +5,14 @@ import android.net.VpnService
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.nullroute.accessibility.BlockerAccessibilityService
 import com.nullroute.data.BlocklistRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
 
@@ -33,6 +36,11 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
 
     init {
         loadData()
+        viewModelScope.launch(Dispatchers.Default) {
+            com.nullroute.vpn.VpnStateTracker.isRunning.collect { running ->
+                _isVpnActive.value = running
+            }
+        }
     }
 
     fun loadData() {
@@ -41,7 +49,7 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     }
 
     fun refreshStates(context: Context) {
-        _isVpnActive.value = VpnService.prepare(context) == null
+        _isVpnActive.value = com.nullroute.vpn.VpnStateTracker.isRunning.value
         _isAccessibilityActive.value = isAccessibilityEnabled(context)
         
         val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)

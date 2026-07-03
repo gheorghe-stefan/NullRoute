@@ -94,10 +94,19 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     var showLockConfirmDialog by remember { mutableStateOf(false) }
     var showBlockedToast by remember { mutableStateOf(initialBlockedAttempt) }
 
-    // Refresh states when returning to/launching activity
-    LaunchedEffect(Unit) {
-        viewModel.refreshStates(context)
-        viewModel.loadData()
+    // Refresh states on app resume
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshStates(context)
+                viewModel.loadData()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // VPN Permission Launcher

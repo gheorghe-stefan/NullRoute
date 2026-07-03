@@ -35,3 +35,4 @@ google-services.json
 
 # NullRoute Blocker Lists (Private Configuration)
 app/src/main/assets/initial_blocked_domains.txt
+app/build_number.properties

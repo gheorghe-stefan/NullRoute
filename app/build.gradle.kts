@@ -1,7 +1,48 @@
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+fun getAndIncrementBuildNumber(): Int {
+    val buildNumFile = file("build_number.properties")
+    val props = Properties()
+    var buildNumber = 0
+    if (buildNumFile.exists()) {
+        try {
+            FileInputStream(buildNumFile).use { props.load(it) }
+            buildNumber = props.getProperty("build.number", "0").toInt()
+        } catch (e: Exception) {
+            buildNumber = 0
+        }
+    }
+    
+    // Check if we are running an actual packaging or deployment task
+    val isBuilding = gradle.startParameter.taskNames.any {
+        it.contains("assemble", ignoreCase = true) || 
+        it.contains("bundle", ignoreCase = true) || 
+        it.contains("install", ignoreCase = true)
+    }
+    
+    if (isBuilding) {
+        buildNumber++
+        props.setProperty("build.number", buildNumber.toString())
+        try {
+            FileOutputStream(buildNumFile).use { props.store(it, "Auto-incremented build number") }
+        } catch (e: Exception) {
+            // Ignore
+        }
+    } else if (buildNumber == 0) {
+        buildNumber = 1 // default starting number
+    }
+    
+    return buildNumber
+}
+
+val currentBuildNumber = getAndIncrementBuildNumber()
 
 android {
     namespace = "com.nullroute"
@@ -11,8 +52,8 @@ android {
         applicationId = "com.nullroute"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0-test"
+        versionCode = currentBuildNumber
+        versionName = "1.0.0.$currentBuildNumber"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -44,6 +85,14 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    applicationVariants.all {
+        val variant = this
+        variant.outputs.all {
+            val output = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
+            output.outputFileName = "NullRoute-${variant.versionName}.apk"
         }
     }
 }
