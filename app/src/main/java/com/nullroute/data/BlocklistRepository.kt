@@ -1,0 +1,78 @@
+package com.nullroute.data
+
+import android.content.Context
+import android.util.Log
+import com.nullroute.utils.DomainNormalizer
+
+interface BlocklistRepository {
+    fun getInitialBlockedDomains(): Set<String>
+    fun getCustomBlockedDomains(): Set<String>
+    fun getAllBlockedDomains(): Set<String>
+    fun addBlockedDomain(domain: String): Boolean
+}
+
+class SharedPreferencesBlocklistRepository(private val context: Context) : BlocklistRepository {
+
+    companion object {
+        private const val PREFS_NAME = "nullroute_prefs"
+        private const val KEY_CUSTOM_DOMAINS = "custom_blocked_domains"
+        private const val TAG = "NullRouteRepo"
+    }
+
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    // Cache initial list using lazy loading to avoid redundant asset parsing
+    private val initialDomainsCache: Set<String> by lazy {
+        loadInitialBlockedDomains()
+    }
+
+    override fun getInitialBlockedDomains(): Set<String> {
+        return initialDomainsCache
+    }
+
+    override fun getCustomBlockedDomains(): Set<String> {
+        return prefs.getStringSet(KEY_CUSTOM_DOMAINS, emptySet()) ?: emptySet()
+    }
+
+    override fun getAllBlockedDomains(): Set<String> {
+        return getInitialBlockedDomains() + getCustomBlockedDomains()
+    }
+
+    override fun addBlockedDomain(domain: String): Boolean {
+        val normalized = DomainNormalizer.normalize(domain) ?: return false
+        
+        // Return false if it already exists in the immutable/initial list
+        if (getInitialBlockedDomains().contains(normalized)) {
+            return false
+        }
+
+        val custom = getCustomBlockedDomains().toMutableSet()
+        if (custom.add(normalized)) {
+            prefs.edit().putStringSet(KEY_CUSTOM_DOMAINS, custom).apply()
+            return true
+        }
+        return false
+    }
+
+    private fun loadInitialBlockedDomains(): Set<String> {
+        val domains = mutableSetOf<String>()
+        try {
+            context.assets.open("initial_blocked_domains.txt").use { inputStream ->
+                inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        val normalized = DomainNormalizer.normalize(line)
+                        if (normalized != null) {
+                            domains.add(normalized)
+                        }
+                    }
+                }
+            }
+            Log.d(TAG, "Successfully loaded ${domains.size} initial domains from assets.")
+        } catch (e: java.io.FileNotFoundException) {
+            Log.w(TAG, "initial_blocked_domains.txt not found in assets. App starting with an empty initial list.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading initial_blocked_domains.txt from assets", e)
+        }
+        return domains
+    }
+}
