@@ -32,3 +32,7 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# NullRoute Blocker Lists (Private Configuration)
+app/src/main/assets/initial_blocked_domains.txt
+app/build_number.properties

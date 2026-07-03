@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">NullRoute</string>
+    <string name="accessibility_service_description">NullRoute Blocker requires this service to protect itself from being force-stopped or uninstalled in Settings.</string>
+</resources>
