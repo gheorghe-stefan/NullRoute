@@ -36,6 +36,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Clear bypass protection preference in release/final version to enforce strict locking
+        val prefs = getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
+        if (prefs.contains("bypass_protection")) {
+            prefs.edit().remove("bypass_protection").apply()
+        }
+
         // Check if we were launched due to a blocked settings/uninstall attempt
         val isBlockedAttempt = intent.getBooleanExtra("BLOCKED_ATTEMPT", false)
 
@@ -86,7 +92,6 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     val isVpnActive by viewModel.isVpnActive.collectAsState()
     val isAccessibilityActive by viewModel.isAccessibilityActive.collectAsState()
     val isPermanentLockActive by viewModel.isPermanentLockActive.collectAsState()
-    val isBypassActive by viewModel.isBypassProtectionActive.collectAsState()
     val initialDomains by viewModel.initialDomains.collectAsState()
     val customDomains by viewModel.customDomains.collectAsState()
 
@@ -282,37 +287,6 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         ) {
                             Text(if (isAccessibilityActive) "Active" else "Enable")
                         }
-                    }
-                }
-            }
-
-            // Developer Testing Bypass Control Card
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Testing Bypass (Developer Mode)", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                text = if (isBypassActive) "Bypass Active (Easy Uninstall)" else "Bypass Inactive (Strict Lock)",
-                                fontSize = 12.sp,
-                                color = if (isBypassActive) Color(0xFF10B981) else Color(0xFFEF4444)
-                            )
-                        }
-                        Switch(
-                            checked = isBypassActive,
-                            onCheckedChange = { checked ->
-                                viewModel.setBypassProtection(context, checked)
-                            }
-                        )
                     }
                 }
             }
