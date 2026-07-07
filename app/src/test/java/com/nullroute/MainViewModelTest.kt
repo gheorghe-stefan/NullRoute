@@ -25,6 +25,12 @@ class MainViewModelTest {
             if (initial.contains(normalized)) return false
             return custom.add(normalized)
         }
+
+        override fun removeBlockedDomain(domain: String): Boolean {
+            val normalized = com.nullroute.utils.DomainNormalizer.normalize(domain) ?: return false
+            if (initial.contains(normalized)) return false
+            return custom.remove(normalized)
+        }
     }
 
     @Before
@@ -57,5 +63,23 @@ class MainViewModelTest {
     fun testAddInitialDuplicateDomain() {
         assertFalse(viewModel.addDomain("facebook.com")) // Already present in initial set
         assertTrue(viewModel.customDomains.value.isEmpty())
+    }
+
+    @Test
+    fun testRemoveCustomDomain() {
+        assertTrue(viewModel.addDomain("instagram.com"))
+        assertTrue(viewModel.removeDomain("instagram.com"))
+        assertFalse(viewModel.customDomains.value.contains("instagram.com"))
+        assertTrue(viewModel.customDomains.value.isEmpty())
+    }
+
+    @Test
+    fun testRemoveInitialDomainFails() {
+        assertFalse(viewModel.removeDomain("facebook.com")) // Initial domain cannot be removed
+    }
+
+    @Test
+    fun testRemoveNonExistentDomainFails() {
+        assertFalse(viewModel.removeDomain("twitter.com"))
     }
 }

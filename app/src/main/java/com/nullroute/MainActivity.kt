@@ -37,9 +37,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // Clear bypass protection preference in release/final version to enforce strict locking
-        val prefs = getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
-        if (prefs.contains("bypass_protection")) {
-            prefs.edit().remove("bypass_protection").apply()
+        val isDebuggable = (applicationContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (!isDebuggable) {
+            val prefs = getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
+            if (prefs.contains("bypass_protection")) {
+                prefs.edit().remove("bypass_protection").apply()
+            }
         }
 
         // Check if we were launched due to a blocked settings/uninstall attempt
@@ -91,12 +94,10 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     // Collect States from ViewModel
     val isVpnActive by viewModel.isVpnActive.collectAsState()
     val isAccessibilityActive by viewModel.isAccessibilityActive.collectAsState()
-    val isPermanentLockActive by viewModel.isPermanentLockActive.collectAsState()
     val initialDomains by viewModel.initialDomains.collectAsState()
     val customDomains by viewModel.customDomains.collectAsState()
 
     var domainInput by remember { mutableStateOf("") }
-    var showLockConfirmDialog by remember { mutableStateOf(false) }
     var showBlockedToast by remember { mutableStateOf(initialBlockedAttempt) }
 
     // Refresh states on app resume
@@ -139,29 +140,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         )
     }
 
-    if (showLockConfirmDialog) {
-        AlertDialog(
-            onDismissRequest = { showLockConfirmDialog = false },
-            title = { Text("🔒 Freeze Settings Permanently?") },
-            text = { Text("Warning: Once activated, you CANNOT add any more websites to your blocklist. The list will be locked forever. Are you absolutely sure?") },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.freezeLock(context)
-                        showLockConfirmDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Lock Permanently")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showLockConfirmDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
+
 
     Scaffold(
         topBar = {
@@ -291,6 +270,8 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
+
+
             // Blocklist Custom Management Header
             item {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -305,61 +286,43 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground
                     )
-
-                    if (!isPermanentLockActive) {
-                        TextButton(
-                            onClick = { showLockConfirmDialog = true },
-                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))
-                        ) {
-                            Text("🔒 Freeze List")
-                        }
-                    } else {
-                        Text(
-                            text = "Locked 🔒",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFEF4444)
-                        )
-                    }
                 }
             }
 
-            // Add custom domain UI (hidden if permanently locked)
-            if (!isPermanentLockActive) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = domainInput,
-                            onValueChange = { domainInput = it },
-                            label = { Text("Add custom domain") },
-                            placeholder = { Text("e.g. reddit.com") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Button(
-                            onClick = {
-                                val input = domainInput.trim()
-                                if (input.isNotEmpty()) {
-                                    val success = viewModel.addDomain(input)
-                                    if (success) {
-                                        domainInput = ""
-                                        // Restart service to pick up changes immediately
-                                        if (isVpnActive) {
-                                            context.startService(Intent(context, DnsVpnService::class.java))
-                                        }
-                                    } else {
-                                        Toast.makeText(context, "Invalid or duplicate domain", Toast.LENGTH_SHORT).show()
+            // Add custom domain UI
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = domainInput,
+                        onValueChange = { domainInput = it },
+                        label = { Text("Add custom domain") },
+                        placeholder = { Text("e.g. reddit.com") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Button(
+                        onClick = {
+                            val input = domainInput.trim()
+                            if (input.isNotEmpty()) {
+                                val success = viewModel.addDomain(input)
+                                if (success) {
+                                    domainInput = ""
+                                    // Restart service to pick up changes immediately
+                                    if (isVpnActive) {
+                                        context.startService(Intent(context, DnsVpnService::class.java))
                                     }
+                                } else {
+                                    Toast.makeText(context, "Invalid or duplicate domain", Toast.LENGTH_SHORT).show()
                                 }
-                            },
-                            modifier = Modifier.height(56.dp)
-                        ) {
-                            Text("Add")
-                        }
+                            }
+                        },
+                        modifier = Modifier.height(56.dp)
+                    ) {
+                        Text("Add")
                     }
                 }
             }
@@ -385,7 +348,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
             if (customDomains.isNotEmpty()) {
                 item {
                     Text(
-                        text = "User Added Blocker List (No removals allowed):",
+                        text = "User Added Blocker List:",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.Gray,
@@ -394,7 +357,18 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
 
                 items(customDomains.toList()) { domain ->
-                    DomainItem(domain = domain, isHardcoded = false)
+                    DomainItem(
+                        domain = domain,
+                        isHardcoded = false,
+                        showRemoveButton = true,
+                        onRemove = {
+                            val success = viewModel.removeDomain(domain)
+                            if (success && isVpnActive) {
+                                // Restart service to pick up changes immediately
+                                context.startService(Intent(context, DnsVpnService::class.java))
+                            }
+                        }
+                    )
                 }
             }
 
@@ -417,7 +391,12 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
 }
 
 @Composable
-fun DomainItem(domain: String, isHardcoded: Boolean) {
+fun DomainItem(
+    domain: String,
+    isHardcoded: Boolean,
+    showRemoveButton: Boolean = false,
+    onRemove: (() -> Unit)? = null
+) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -438,6 +417,14 @@ fun DomainItem(domain: String, isHardcoded: Boolean) {
                     fontSize = 10.sp,
                     color = if (isHardcoded) Color(0xFFEF4444) else MaterialTheme.colorScheme.primary
                 )
+            }
+            if (showRemoveButton && onRemove != null) {
+                TextButton(
+                    onClick = onRemove,
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))
+                ) {
+                    Text("Remove")
+                }
             }
         }
     }
