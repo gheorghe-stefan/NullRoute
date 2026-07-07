@@ -53,7 +53,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = currentBuildNumber
-        versionName = "1.0.0"
+        versionName = "1.0.1"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -62,6 +62,7 @@ android {
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

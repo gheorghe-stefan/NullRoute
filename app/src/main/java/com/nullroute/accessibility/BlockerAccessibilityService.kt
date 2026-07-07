@@ -9,16 +9,16 @@ import com.nullroute.MainActivity
 class BlockerAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        val prefs = getSharedPreferences("nullroute_prefs", android.content.Context.MODE_PRIVATE)
-        if (prefs.getBoolean("bypass_protection", false)) {
+        val isDebuggable = (applicationContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (isDebuggable) {
             return
         }
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val packageName = event.packageName?.toString() ?: return
 
-            // Monitor interaction within Settings app
-            if (packageName == "com.android.settings") {
+            // Monitor interaction within Settings app or Package Installer
+            if (packageName == "com.android.settings" || packageName.contains("packageinstaller", ignoreCase = true)) {
                 val rootNode = rootInActiveWindow ?: return
                 if (detectAttemptToDisable(rootNode)) {
                     // Redirect back to Home screen to prevent disabling or uninstalling

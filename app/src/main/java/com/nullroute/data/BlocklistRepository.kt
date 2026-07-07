@@ -9,6 +9,7 @@ interface BlocklistRepository {
     fun getCustomBlockedDomains(): Set<String>
     fun getAllBlockedDomains(): Set<String>
     fun addBlockedDomain(domain: String): Boolean
+    fun removeBlockedDomain(domain: String): Boolean
 }
 
 class SharedPreferencesBlocklistRepository(private val context: Context) : BlocklistRepository {
@@ -20,6 +21,26 @@ class SharedPreferencesBlocklistRepository(private val context: Context) : Block
     }
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val file = context.filesDir.resolve("custom_blocked_domains.txt")
+    
+    private var cachedCustomDomains: Set<String> = emptySet()
+    private var lastModifiedTime: Long = -1L
+
+    init {
+        // Migrate custom domains from SharedPreferences to file if preference exists
+        try {
+            if (prefs.contains(KEY_CUSTOM_DOMAINS)) {
+                val custom = prefs.getStringSet(KEY_CUSTOM_DOMAINS, emptySet()) ?: emptySet()
+                if (custom.isNotEmpty() && !file.exists()) {
+                    file.writeText(custom.joinToString("\n"))
+                }
+                // Clear old preference to avoid re-migration
+                prefs.edit().remove(KEY_CUSTOM_DOMAINS).apply()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error migrating custom domains to file", e)
+        }
+    }
 
     // Cache initial list using lazy loading to avoid redundant asset parsing
     private val initialDomainsCache: Set<String> by lazy {
@@ -31,7 +52,26 @@ class SharedPreferencesBlocklistRepository(private val context: Context) : Block
     }
 
     override fun getCustomBlockedDomains(): Set<String> {
-        return prefs.getStringSet(KEY_CUSTOM_DOMAINS, emptySet()) ?: emptySet()
+        return synchronized(this) {
+            if (!file.exists()) {
+                cachedCustomDomains = emptySet()
+                lastModifiedTime = -1L
+                return@synchronized emptySet()
+            }
+            val currentModified = file.lastModified()
+            if (currentModified != lastModifiedTime) {
+                try {
+                    cachedCustomDomains = file.readLines()
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                    lastModifiedTime = currentModified
+                } catch (e: Exception) {
+                    // Ignore and keep using cache on read failure
+                }
+            }
+            cachedCustomDomains
+        }
     }
 
     override fun getAllBlockedDomains(): Set<String> {
@@ -46,12 +86,39 @@ class SharedPreferencesBlocklistRepository(private val context: Context) : Block
             return false
         }
 
-        val custom = getCustomBlockedDomains().toMutableSet()
-        if (custom.add(normalized)) {
-            prefs.edit().putStringSet(KEY_CUSTOM_DOMAINS, custom).apply()
-            return true
+        return synchronized(this) {
+            val custom = getCustomBlockedDomains().toMutableSet()
+            if (custom.add(normalized)) {
+                try {
+                    file.writeText(custom.joinToString("\n"))
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+            } else {
+                false
+            }
         }
-        return false
+    }
+
+    override fun removeBlockedDomain(domain: String): Boolean {
+        val normalized = DomainNormalizer.normalize(domain) ?: return false
+        if (getInitialBlockedDomains().contains(normalized)) {
+            return false
+        }
+        return synchronized(this) {
+            val custom = getCustomBlockedDomains().toMutableSet()
+            if (custom.remove(normalized)) {
+                try {
+                    file.writeText(custom.joinToString("\n"))
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+            } else {
+                false
+            }
+        }
     }
 
     private fun loadInitialBlockedDomains(): Set<String> {

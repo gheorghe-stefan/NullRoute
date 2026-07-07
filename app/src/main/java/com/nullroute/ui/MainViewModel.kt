@@ -58,9 +58,15 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     }
 
     fun addDomain(domain: String): Boolean {
-        if (_isPermanentLockActive.value) return false
-        
         val success = repository.addBlockedDomain(domain)
+        if (success) {
+            _customDomains.value = repository.getCustomBlockedDomains()
+        }
+        return success
+    }
+
+    fun removeDomain(domain: String): Boolean {
+        val success = repository.removeBlockedDomain(domain)
         if (success) {
             _customDomains.value = repository.getCustomBlockedDomains()
         }
