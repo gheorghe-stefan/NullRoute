@@ -11,24 +11,31 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nullroute.data.BlockedDomain
 import com.nullroute.data.SharedPreferencesBlocklistRepository
 import com.nullroute.ui.MainViewModel
 import com.nullroute.ui.MainViewModelFactory
+import com.nullroute.utils.DomainNormalizer
 import com.nullroute.vpn.DnsVpnService
 
 class MainActivity : ComponentActivity() {
@@ -94,11 +101,11 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     // Collect States from ViewModel
     val isVpnActive by viewModel.isVpnActive.collectAsState()
     val isAccessibilityActive by viewModel.isAccessibilityActive.collectAsState()
-    val initialDomains by viewModel.initialDomains.collectAsState()
-    val customDomains by viewModel.customDomains.collectAsState()
+    val blockedDomains by viewModel.blockedDomains.collectAsState()
 
     var domainInput by remember { mutableStateOf("") }
     var showBlockedToast by remember { mutableStateOf(initialBlockedAttempt) }
+    var pendingDomainToAdd by remember { mutableStateOf<String?>(null) }
 
     // Refresh states on app resume
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -140,7 +147,58 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         )
     }
 
-
+    // Popup for adding domain: asks if entry is supposed to be removable or not
+    if (pendingDomainToAdd != null) {
+        AlertDialog(
+            onDismissRequest = { pendingDomainToAdd = null },
+            title = { Text("Domain Removability Option") },
+            text = {
+                Text(
+                    "Is \"${pendingDomainToAdd}\" supposed to be removable later?\n\n" +
+                    "• Clicking YES will add the domain to blocked list FOREVER (non-removable).\n" +
+                    "• Clicking NO will add it as REMOVABLE (a delete icon will be shown)."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val domain = pendingDomainToAdd!!
+                        pendingDomainToAdd = null
+                        val success = viewModel.addDomain(domain, isRemovable = false)
+                        if (success) {
+                            domainInput = ""
+                            if (isVpnActive) {
+                                context.startService(Intent(context, DnsVpnService::class.java))
+                            }
+                        } else {
+                            Toast.makeText(context, "Failed to add domain (duplicate or invalid)", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("Yes (Forever)")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        val domain = pendingDomainToAdd!!
+                        pendingDomainToAdd = null
+                        val success = viewModel.addDomain(domain, isRemovable = true)
+                        if (success) {
+                            domainInput = ""
+                            if (isVpnActive) {
+                                context.startService(Intent(context, DnsVpnService::class.java))
+                            }
+                        } else {
+                            Toast.makeText(context, "Failed to add domain (duplicate or invalid)", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("No (Removable)")
+                }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -270,8 +328,6 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
-
-
             // Blocklist Custom Management Header
             item {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -281,7 +337,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Blocklist Domains",
+                        text = "Blocked Domains",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground
@@ -289,7 +345,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
-            // Add custom domain UI
+            // Add domain UI
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -307,17 +363,13 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                     Button(
                         onClick = {
                             val input = domainInput.trim()
-                            if (input.isNotEmpty()) {
-                                val success = viewModel.addDomain(input)
-                                if (success) {
-                                    domainInput = ""
-                                    // Restart service to pick up changes immediately
-                                    if (isVpnActive) {
-                                        context.startService(Intent(context, DnsVpnService::class.java))
-                                    }
-                                } else {
-                                    Toast.makeText(context, "Invalid or duplicate domain", Toast.LENGTH_SHORT).show()
-                                }
+                            val normalized = DomainNormalizer.normalize(input)
+                            if (normalized == null) {
+                                Toast.makeText(context, "Invalid domain format", Toast.LENGTH_SHORT).show()
+                            } else if (viewModel.blockedDomains.value.any { it.domain.equals(normalized, ignoreCase = true) }) {
+                                Toast.makeText(context, "Domain is already blocked", Toast.LENGTH_SHORT).show()
+                            } else {
+                                pendingDomainToAdd = normalized
                             }
                         },
                         modifier = Modifier.height(56.dp)
@@ -327,47 +379,28 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
-            // Display Blocked List - Initial
-            if (initialDomains.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "Carved in Stone (Initial Asset List):",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.Gray,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-
-                items(initialDomains.toList()) { domain ->
-                    DomainItem(domain = domain, isHardcoded = true)
-                }
-            }
-
-            // Display Blocked List - Custom Added
-            if (customDomains.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "User Added Blocker List:",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.Gray,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-
-                items(customDomains.toList()) { domain ->
+            // Display Blocked List
+            if (blockedDomains.isNotEmpty()) {
+                items(blockedDomains) { domainItem ->
                     DomainItem(
-                        domain = domain,
-                        isHardcoded = false,
-                        showRemoveButton = true,
-                        onRemove = {
-                            val success = viewModel.removeDomain(domain)
-                            if (success && isVpnActive) {
-                                // Restart service to pick up changes immediately
-                                context.startService(Intent(context, DnsVpnService::class.java))
+                        domain = domainItem,
+                        onRemove = if (domainItem.isRemovable) {
+                            {
+                                val success = viewModel.removeDomain(domainItem.domain)
+                                if (success && isVpnActive) {
+                                    context.startService(Intent(context, DnsVpnService::class.java))
+                                }
                             }
-                        }
+                        } else null
+                    )
+                }
+            } else {
+                item {
+                    Text(
+                        text = "No blocked domains configured.",
+                        fontSize = 14.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(top = 8.dp)
                     )
                 }
             }
@@ -392,16 +425,17 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
 
 @Composable
 fun DomainItem(
-    domain: String,
-    isHardcoded: Boolean,
-    showRemoveButton: Boolean = false,
+    domain: BlockedDomain,
     onRemove: (() -> Unit)? = null
 ) {
+    var isRevealed by rememberSaveable { mutableStateOf(false) }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp)),
-        color = MaterialTheme.colorScheme.surface
+            .clip(RoundedCornerShape(12.dp)),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp
     ) {
         Row(
             modifier = Modifier
@@ -410,20 +444,55 @@ fun DomainItem(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(domain, fontWeight = FontWeight.Medium)
+            Column(modifier = Modifier.weight(1f)) {
+                Box {
+                    Text(
+                        text = domain.domain,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = if (!isRevealed) {
+                            Modifier.blur(10.dp)
+                        } else {
+                            Modifier
+                        }
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                val badgeText = if (domain.isRemovable) "Removable" else "Permanent (Forever)"
+                val badgeColor = if (domain.isRemovable) MaterialTheme.colorScheme.primary else Color(0xFFF59E0B)
                 Text(
-                    text = if (isHardcoded) "Initial File List" else "User Custom List",
-                    fontSize = 10.sp,
-                    color = if (isHardcoded) Color(0xFFEF4444) else MaterialTheme.colorScheme.primary
+                    text = badgeText,
+                    fontSize = 11.sp,
+                    color = badgeColor
                 )
             }
-            if (showRemoveButton && onRemove != null) {
-                TextButton(
-                    onClick = onRemove,
-                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (domain.isRemovable && onRemove != null) {
+                    IconButton(
+                        onClick = onRemove,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Remove domain",
+                            tint = Color(0xFFEF4444)
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = { isRevealed = !isRevealed },
+                    modifier = Modifier.size(36.dp)
                 ) {
-                    Text("Remove")
+                    Icon(
+                        imageVector = if (isRevealed) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                        contentDescription = if (isRevealed) "Hide domain" else "Reveal domain",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
         }

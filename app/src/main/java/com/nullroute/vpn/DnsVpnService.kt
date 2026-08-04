@@ -370,7 +370,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun isDomainBlocked(domain: String): Boolean {
-        val blockedSet = repository.getAllBlockedDomains()
+        val blockedSet = repository.getBlockedDomainStrings()
         return blockedSet.any { domain.equals(it, ignoreCase = true) || domain.endsWith(".$it", ignoreCase = true) }
     }
 
