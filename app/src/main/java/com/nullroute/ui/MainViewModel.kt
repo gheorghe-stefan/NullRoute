@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nullroute.accessibility.BlockerAccessibilityService
+import com.nullroute.data.BlockedDomain
 import com.nullroute.data.BlocklistRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,11 +29,8 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     private val _isBypassProtectionActive = MutableStateFlow(false)
     val isBypassProtectionActive: StateFlow<Boolean> = _isBypassProtectionActive.asStateFlow()
 
-    private val _initialDomains = MutableStateFlow<Set<String>>(emptySet())
-    val initialDomains: StateFlow<Set<String>> = _initialDomains.asStateFlow()
-
-    private val _customDomains = MutableStateFlow<Set<String>>(emptySet())
-    val customDomains: StateFlow<Set<String>> = _customDomains.asStateFlow()
+    private val _blockedDomains = MutableStateFlow<List<BlockedDomain>>(emptyList())
+    val blockedDomains: StateFlow<List<BlockedDomain>> = _blockedDomains.asStateFlow()
 
     init {
         loadData()
@@ -44,8 +42,7 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     }
 
     fun loadData() {
-        _initialDomains.value = repository.getInitialBlockedDomains()
-        _customDomains.value = repository.getCustomBlockedDomains()
+        _blockedDomains.value = repository.getBlockedDomains()
     }
 
     fun refreshStates(context: Context) {
@@ -57,10 +54,10 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
         _isBypassProtectionActive.value = prefs.getBoolean("bypass_protection", false)
     }
 
-    fun addDomain(domain: String): Boolean {
-        val success = repository.addBlockedDomain(domain)
+    fun addDomain(domain: String, isRemovable: Boolean = true): Boolean {
+        val success = repository.addBlockedDomain(domain, isRemovable)
         if (success) {
-            _customDomains.value = repository.getCustomBlockedDomains()
+            loadData()
         }
         return success
     }
@@ -68,7 +65,7 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     fun removeDomain(domain: String): Boolean {
         val success = repository.removeBlockedDomain(domain)
         if (success) {
-            _customDomains.value = repository.getCustomBlockedDomains()
+            loadData()
         }
         return success
     }

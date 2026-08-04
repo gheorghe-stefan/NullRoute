@@ -5,10 +5,9 @@ import android.util.Log
 import com.nullroute.utils.DomainNormalizer
 
 interface BlocklistRepository {
-    fun getInitialBlockedDomains(): Set<String>
-    fun getCustomBlockedDomains(): Set<String>
-    fun getAllBlockedDomains(): Set<String>
-    fun addBlockedDomain(domain: String): Boolean
+    fun getBlockedDomains(): List<BlockedDomain>
+    fun getBlockedDomainStrings(): Set<String>
+    fun addBlockedDomain(domain: String, isRemovable: Boolean = true): Boolean
     fun removeBlockedDomain(domain: String): Boolean
 }
 
@@ -23,79 +22,74 @@ class SharedPreferencesBlocklistRepository(private val context: Context) : Block
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val file = context.filesDir.resolve("custom_blocked_domains.txt")
     
-    private var cachedCustomDomains: Set<String> = emptySet()
+    private var cachedDomains: List<BlockedDomain> = emptyList()
     private var lastModifiedTime: Long = -1L
 
     init {
-        // Migrate custom domains from SharedPreferences to file if preference exists
+        // Migrate custom domains from SharedPreferences if preference exists
         try {
             if (prefs.contains(KEY_CUSTOM_DOMAINS)) {
                 val custom = prefs.getStringSet(KEY_CUSTOM_DOMAINS, emptySet()) ?: emptySet()
                 if (custom.isNotEmpty() && !file.exists()) {
-                    file.writeText(custom.joinToString("\n"))
+                    file.writeText(custom.joinToString("\n") { "$it|true" })
                 }
-                // Clear old preference to avoid re-migration
                 prefs.edit().remove(KEY_CUSTOM_DOMAINS).apply()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error migrating custom domains to file", e)
+            Log.e(TAG, "Error migrating domains to file", e)
         }
     }
 
-    // Cache initial list using lazy loading to avoid redundant asset parsing
-    private val initialDomainsCache: Set<String> by lazy {
-        loadInitialBlockedDomains()
-    }
-
-    override fun getInitialBlockedDomains(): Set<String> {
-        return initialDomainsCache
-    }
-
-    override fun getCustomBlockedDomains(): Set<String> {
+    override fun getBlockedDomains(): List<BlockedDomain> {
         return synchronized(this) {
             if (!file.exists()) {
-                cachedCustomDomains = emptySet()
+                cachedDomains = emptyList()
                 lastModifiedTime = -1L
-                return@synchronized emptySet()
+                return@synchronized emptyList()
             }
             val currentModified = file.lastModified()
             if (currentModified != lastModifiedTime) {
                 try {
-                    cachedCustomDomains = file.readLines()
+                    cachedDomains = file.readLines()
                         .map { it.trim() }
                         .filter { it.isNotEmpty() }
-                        .toSet()
+                        .mapNotNull { line ->
+                            val parts = line.split("|")
+                            val normalized = DomainNormalizer.normalize(parts[0]) ?: return@mapNotNull null
+                            val isRemovable = if (parts.size > 1) parts[1].toBooleanStrictOrNull() ?: true else true
+                            BlockedDomain(domain = normalized, isRemovable = isRemovable)
+                        }
                     lastModifiedTime = currentModified
                 } catch (e: Exception) {
                     // Ignore and keep using cache on read failure
                 }
             }
-            cachedCustomDomains
+            cachedDomains
         }
     }
 
-    override fun getAllBlockedDomains(): Set<String> {
-        return getInitialBlockedDomains() + getCustomBlockedDomains()
+    override fun getBlockedDomainStrings(): Set<String> {
+        return getBlockedDomains().map { it.domain }.toSet()
     }
 
-    override fun addBlockedDomain(domain: String): Boolean {
+    override fun addBlockedDomain(domain: String, isRemovable: Boolean): Boolean {
         val normalized = DomainNormalizer.normalize(domain) ?: return false
         
-        // Return false if it already exists in the immutable/initial list
-        if (getInitialBlockedDomains().contains(normalized)) {
+        // Return false if domain already exists
+        if (getBlockedDomainStrings().contains(normalized)) {
             return false
         }
 
         return synchronized(this) {
-            val custom = getCustomBlockedDomains().toMutableSet()
-            if (custom.add(normalized)) {
-                try {
-                    file.writeText(custom.joinToString("\n"))
-                    true
-                } catch (e: Exception) {
-                    false
-                }
-            } else {
+            val list = getBlockedDomains().toMutableList()
+            val newEntry = BlockedDomain(domain = normalized, isRemovable = isRemovable)
+            list.add(newEntry)
+            try {
+                file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
+                cachedDomains = list
+                lastModifiedTime = file.lastModified()
+                true
+            } catch (e: Exception) {
                 false
             }
         }
@@ -103,43 +97,25 @@ class SharedPreferencesBlocklistRepository(private val context: Context) : Block
 
     override fun removeBlockedDomain(domain: String): Boolean {
         val normalized = DomainNormalizer.normalize(domain) ?: return false
-        if (getInitialBlockedDomains().contains(normalized)) {
-            return false
-        }
+
         return synchronized(this) {
-            val custom = getCustomBlockedDomains().toMutableSet()
-            if (custom.remove(normalized)) {
-                try {
-                    file.writeText(custom.joinToString("\n"))
-                    true
-                } catch (e: Exception) {
-                    false
-                }
-            } else {
+            val list = getBlockedDomains().toMutableList()
+            val target = list.find { it.domain == normalized } ?: return@synchronized false
+            
+            // Non-removable domain cannot be removed
+            if (!target.isRemovable) {
+                return@synchronized false
+            }
+
+            list.remove(target)
+            try {
+                file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
+                cachedDomains = list
+                lastModifiedTime = file.lastModified()
+                true
+            } catch (e: Exception) {
                 false
             }
         }
-    }
-
-    private fun loadInitialBlockedDomains(): Set<String> {
-        val domains = mutableSetOf<String>()
-        try {
-            context.assets.open("initial_blocked_domains.txt").use { inputStream ->
-                inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        val normalized = DomainNormalizer.normalize(line)
-                        if (normalized != null) {
-                            domains.add(normalized)
-                        }
-                    }
-                }
-            }
-            Log.d(TAG, "Successfully loaded ${domains.size} initial domains from assets.")
-        } catch (e: java.io.FileNotFoundException) {
-            Log.w(TAG, "initial_blocked_domains.txt not found in assets. App starting with an empty initial list.")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error reading initial_blocked_domains.txt from assets", e)
-        }
-        return domains
     }
 }
