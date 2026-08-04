@@ -11,34 +11,16 @@ interface BlocklistRepository {
     fun removeBlockedDomain(domain: String): Boolean
 }
 
-class SharedPreferencesBlocklistRepository(private val context: Context) : BlocklistRepository {
+class FileBlocklistRepository(private val context: Context) : BlocklistRepository {
 
     companion object {
-        private const val PREFS_NAME = "nullroute_prefs"
-        private const val KEY_CUSTOM_DOMAINS = "custom_blocked_domains"
         private const val TAG = "NullRouteRepo"
     }
 
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val file = context.filesDir.resolve("custom_blocked_domains.txt")
+    private val file = context.filesDir.resolve("blocked_domains.txt")
     
     private var cachedDomains: List<BlockedDomain> = emptyList()
     private var lastModifiedTime: Long = -1L
-
-    init {
-        // Migrate custom domains from SharedPreferences if preference exists
-        try {
-            if (prefs.contains(KEY_CUSTOM_DOMAINS)) {
-                val custom = prefs.getStringSet(KEY_CUSTOM_DOMAINS, emptySet()) ?: emptySet()
-                if (custom.isNotEmpty() && !file.exists()) {
-                    file.writeText(custom.joinToString("\n") { "$it|true" })
-                }
-                prefs.edit().remove(KEY_CUSTOM_DOMAINS).apply()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error migrating domains to file", e)
-        }
-    }
 
     override fun getBlockedDomains(): List<BlockedDomain> {
         return synchronized(this) {
@@ -119,3 +101,6 @@ class SharedPreferencesBlocklistRepository(private val context: Context) : Block
         }
     }
 }
+
+// Typealias for backwards compatibility
+typealias SharedPreferencesBlocklistRepository = FileBlocklistRepository
