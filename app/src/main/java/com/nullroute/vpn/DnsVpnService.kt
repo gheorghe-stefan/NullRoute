@@ -15,12 +15,14 @@ import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class DnsVpnService : VpnService() {
 
     companion object {
         private const val TAG = "NullRouteVPN"
+        private const val DNS_CACHE_TTL_MS = 60_000L // 60 seconds in-memory cache
 
         // IPv6 DNS Server address representation (fd00:a:b:c::1)
         private val IPV6_DNS_SERVER = byteArrayOf(
@@ -35,22 +37,37 @@ class DnsVpnService : VpnService() {
         )
     }
 
+    private data class CachedDnsResponse(
+        val timestampMs: Long,
+        val payload: ByteArray
+    )
+
     private var vpnInterface: ParcelFileDescriptor? = null
     
     @Volatile
     private var activeThread: Thread? = null
+
+    @Volatile
+    private var cachedBlockedDomains: Set<String> = emptySet()
+
+    private val dnsResponseCache = ConcurrentHashMap<String, CachedDnsResponse>()
     
-    private val dnsExecutor = Executors.newCachedThreadPool()
+    private val dnsExecutor = Executors.newFixedThreadPool(4)
     private lateinit var repository: BlocklistRepository
+
+    @Volatile
+    private var forwardingSocket: DatagramSocket? = null
 
     override fun onCreate() {
         super.onCreate()
         repository = SharedPreferencesBlocklistRepository(applicationContext)
+        reloadBlockedDomainsCache()
         Log.i(TAG, "VPN Service Created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "VPN Service Starting")
+        reloadBlockedDomainsCache()
         
         // Thread-safe prevention of duplicate loop/interface initializations
         if (activeThread != null && activeThread!!.isAlive) {
@@ -73,6 +90,40 @@ class DnsVpnService : VpnService() {
         activeThread?.interrupt()
         activeThread = null
         super.onDestroy()
+    }
+
+    private fun reloadBlockedDomainsCache() {
+        try {
+            cachedBlockedDomains = repository.getBlockedDomainStrings()
+            Log.d(TAG, "Reloaded in-memory blocklist cache: ${cachedBlockedDomains.size} domains")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reloading blocklist cache", e)
+        }
+    }
+
+    private fun getOrCreateForwardingSocket(): DatagramSocket? {
+        val s1 = forwardingSocket
+        if (s1 != null && !s1.isClosed) {
+            return s1
+        }
+        return synchronized(this) {
+            val s2 = forwardingSocket
+            if (s2 != null && !s2.isClosed) {
+                s2
+            } else {
+                try {
+                    val newSocket = DatagramSocket().apply {
+                        soTimeout = 2000
+                    }
+                    protect(newSocket)
+                    forwardingSocket = newSocket
+                    newSocket
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error creating protected DatagramSocket", e)
+                    null
+                }
+            }
+        }
     }
 
     private fun startForegroundService() {
@@ -209,10 +260,7 @@ class DnsVpnService : VpnService() {
                     val clientIp = ByteArray(4)
                     System.arraycopy(buffer, 12, clientIp, 0, 4) // Source IP
 
-                    Log.i(TAG, "IPv4 DNS Lookup: $domain")
-
                     if (isDomainBlocked(domain)) {
-                        Log.i(TAG, "BLOCKED (IPv4): $domain")
                         // Return NXDOMAIN (Name Error)
                         val dnsQuestionLen = endOffset + 4 - dnsOffset
                         val responseDns = ByteArray(dnsQuestionLen)
@@ -235,33 +283,62 @@ class DnsVpnService : VpnService() {
                             outputStream.write(responsePacket)
                         }
                     } else {
-                        // Forward query to Google Public DNS
+                        // Check In-Memory DNS Cache first
+                        val now = System.currentTimeMillis()
+                        val cached = dnsResponseCache[domain]
+                        if (cached != null && (now - cached.timestampMs) < DNS_CACHE_TTL_MS) {
+                            // Instant response from cache! Overwrite Transaction ID
+                            val cachedPayload = cached.payload.copyOf()
+                            cachedPayload[0] = buffer[dnsOffset]
+                            cachedPayload[1] = buffer[dnsOffset + 1]
+
+                            val ipUdpResponse = buildIpUdpPacket(
+                                srcIp = byteArrayOf(10, 0, 0, 1),
+                                destIp = clientIp,
+                                srcPort = 53,
+                                destPort = srcPort,
+                                payload = cachedPayload,
+                                payloadLen = cachedPayload.size
+                            )
+                            synchronized(outputStream) {
+                                outputStream.write(ipUdpResponse)
+                            }
+                            return
+                        }
+
+                        // Forward query to Google Public DNS using persistent protected socket
+                        val dnsQuery = ByteArray(dnsLen)
+                        System.arraycopy(buffer, dnsOffset, dnsQuery, 0, dnsLen)
+
                         dnsExecutor.submit {
                             try {
-                                val dnsQuery = ByteArray(dnsLen)
-                                System.arraycopy(buffer, dnsOffset, dnsQuery, 0, dnsLen)
-
-                                DatagramSocket().use { socket ->
-                                    socket.soTimeout = 2500
-                                    val forwardPacket = DatagramPacket(
-                                        dnsQuery,
-                                        dnsLen,
-                                        InetAddress.getByName("8.8.8.8"),
-                                        53
-                                    )
+                                val socket = getOrCreateForwardingSocket() ?: return@submit
+                                val forwardPacket = DatagramPacket(
+                                    dnsQuery,
+                                    dnsLen,
+                                    InetAddress.getByName("8.8.8.8"),
+                                    53
+                                )
+                                synchronized(socket) {
                                     socket.send(forwardPacket)
 
                                     val responseBuf = ByteArray(2048)
                                     val receivePacket = DatagramPacket(responseBuf, responseBuf.size)
                                     socket.receive(receivePacket)
 
+                                    val receivedPayload = ByteArray(receivePacket.length)
+                                    System.arraycopy(responseBuf, 0, receivedPayload, 0, receivePacket.length)
+
+                                    // Store in Cache
+                                    dnsResponseCache[domain] = CachedDnsResponse(System.currentTimeMillis(), receivedPayload)
+
                                     val ipUdpResponse = buildIpUdpPacket(
                                         srcIp = byteArrayOf(10, 0, 0, 1),
                                         destIp = clientIp,
                                         srcPort = 53,
                                         destPort = srcPort,
-                                        payload = responseBuf,
-                                        payloadLen = receivePacket.length
+                                        payload = receivedPayload,
+                                        payloadLen = receivedPayload.size
                                     )
 
                                     synchronized(outputStream) {
@@ -301,10 +378,7 @@ class DnsVpnService : VpnService() {
                     val clientIp = ByteArray(16)
                     System.arraycopy(buffer, 8, clientIp, 0, 16) // Source IP is at offset 8 to 23
 
-                    Log.i(TAG, "IPv6 DNS Lookup: $domain")
-
                     if (isDomainBlocked(domain)) {
-                        Log.i(TAG, "BLOCKED (IPv6): $domain")
                         // Return NXDOMAIN
                         val dnsQuestionLen = endOffset + 4 - dnsOffset
                         val responseDns = ByteArray(dnsQuestionLen)
@@ -326,33 +400,60 @@ class DnsVpnService : VpnService() {
                             outputStream.write(responsePacket)
                         }
                     } else {
+                        // Check In-Memory DNS Cache first
+                        val now = System.currentTimeMillis()
+                        val cached = dnsResponseCache[domain]
+                        if (cached != null && (now - cached.timestampMs) < DNS_CACHE_TTL_MS) {
+                            val cachedPayload = cached.payload.copyOf()
+                            cachedPayload[0] = buffer[dnsOffset]
+                            cachedPayload[1] = buffer[dnsOffset + 1]
+
+                            val ipV6Response = buildIpV6UdpPacket(
+                                srcIp = IPV6_DNS_SERVER,
+                                destIp = clientIp,
+                                srcPort = 53,
+                                destPort = srcPort,
+                                payload = cachedPayload,
+                                payloadLen = cachedPayload.size
+                            )
+                            synchronized(outputStream) {
+                                outputStream.write(ipV6Response)
+                            }
+                            return
+                        }
+
                         // Forward query to Google Public IPv6 DNS: [2001:4860:4860::8888]
+                        val dnsQuery = ByteArray(dnsLen)
+                        System.arraycopy(buffer, dnsOffset, dnsQuery, 0, dnsLen)
+
                         dnsExecutor.submit {
                             try {
-                                val dnsQuery = ByteArray(dnsLen)
-                                System.arraycopy(buffer, dnsOffset, dnsQuery, 0, dnsLen)
-
-                                DatagramSocket().use { socket ->
-                                    socket.soTimeout = 2500
-                                    val forwardPacket = DatagramPacket(
-                                        dnsQuery,
-                                        dnsLen,
-                                        InetAddress.getByName("2001:4860:4860::8888"),
-                                        53
-                                    )
+                                val socket = getOrCreateForwardingSocket() ?: return@submit
+                                val forwardPacket = DatagramPacket(
+                                    dnsQuery,
+                                    dnsLen,
+                                    InetAddress.getByName("2001:4860:4860::8888"),
+                                    53
+                                )
+                                synchronized(socket) {
                                     socket.send(forwardPacket)
 
                                     val responseBuf = ByteArray(2048)
                                     val receivePacket = DatagramPacket(responseBuf, responseBuf.size)
                                     socket.receive(receivePacket)
 
+                                    val receivedPayload = ByteArray(receivePacket.length)
+                                    System.arraycopy(responseBuf, 0, receivedPayload, 0, receivePacket.length)
+
+                                    dnsResponseCache[domain] = CachedDnsResponse(System.currentTimeMillis(), receivedPayload)
+
                                     val ipV6Response = buildIpV6UdpPacket(
                                         srcIp = IPV6_DNS_SERVER,
                                         destIp = clientIp,
                                         srcPort = 53,
                                         destPort = srcPort,
-                                        payload = responseBuf,
-                                        payloadLen = receivePacket.length
+                                        payload = receivedPayload,
+                                        payloadLen = receivedPayload.size
                                     )
 
                                     synchronized(outputStream) {
@@ -370,8 +471,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun isDomainBlocked(domain: String): Boolean {
-        val blockedSet = repository.getBlockedDomainStrings()
-        return blockedSet.any { domain.equals(it, ignoreCase = true) || domain.endsWith(".$it", ignoreCase = true) }
+        return cachedBlockedDomains.any { domain.equals(it, ignoreCase = true) || domain.endsWith(".$it", ignoreCase = true) }
     }
 
     private fun getShort(data: ByteArray, offset: Int): Int {
@@ -515,6 +615,13 @@ class DnsVpnService : VpnService() {
 
     private fun cleanup() {
         Log.i(TAG, "Cleaning up VPN interface...")
+        try {
+            forwardingSocket?.close()
+        } catch (e: Exception) {
+            // Ignore
+        }
+        forwardingSocket = null
+
         try {
             vpnInterface?.close()
             Log.i(TAG, "VPN interface closed successfully")
