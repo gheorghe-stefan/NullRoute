@@ -1,6 +1,8 @@
 package com.nullroute
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
@@ -16,7 +18,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -102,6 +108,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     val isVpnActive by viewModel.isVpnActive.collectAsState()
     val isAccessibilityActive by viewModel.isAccessibilityActive.collectAsState()
     val blockedDomains by viewModel.blockedDomains.collectAsState()
+    val telemetry by viewModel.telemetrySnapshot.collectAsState()
 
     var domainInput by remember { mutableStateOf("") }
     var showBlockedToast by remember { mutableStateOf(initialBlockedAttempt) }
@@ -328,6 +335,20 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
+            // Live Telemetry & Diagnostics Card
+            item {
+                DiagnosticsCard(
+                    telemetry = telemetry,
+                    onCopyReport = {
+                        val report = viewModel.getExportTelemetryReport()
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("NullRoute Telemetry Report", report)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(context, "Telemetry report copied to clipboard!", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
             // Blocklist Custom Management Header
             item {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -505,5 +526,112 @@ fun getAppVersion(context: Context): String {
         packageInfo.versionName ?: "1.0.0-test"
     } catch (e: Exception) {
         "1.0.0-test"
+    }
+}
+
+@Composable
+fun DiagnosticsCard(
+    telemetry: com.nullroute.vpn.TelemetrySnapshot,
+    onCopyReport: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Analytics,
+                        contentDescription = "Diagnostics",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Column {
+                        Text(
+                            text = "Telemetry & Diagnostics",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = "Queries: ${telemetry.totalQueries} | QPS: ${String.format(java.util.Locale.US, "%.1f", telemetry.currentQps)} (Peak: ${String.format(java.util.Locale.US, "%.1f", telemetry.peakQps)})",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                IconButton(onClick = { expanded = !expanded }) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (expanded) "Collapse" else "Expand"
+                    )
+                }
+            }
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Divider(color = MaterialTheme.colorScheme.background)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Stats Grid
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    MetricItem(title = "Cache Hit Rate", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.cacheHitRatioPct)}%")
+                    MetricItem(title = "Avg Latency", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.avgLatencyMs)} ms")
+                    MetricItem(title = "P95 Latency", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.p95LatencyMs)} ms")
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    MetricItem(title = "Lock Wait (avg)", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.avgLockWaitMs)} ms")
+                    MetricItem(title = "Timeouts", value = "${telemetry.timeouts}")
+                    MetricItem(title = "Net Errors", value = "${telemetry.networkErrors}")
+                }
+
+                if (telemetry.qTypeCounts.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Record Types: " + telemetry.qTypeCounts.entries.joinToString(", ") { "${it.key}: ${it.value}" },
+                        fontSize = 11.sp,
+                        color = Color.LightGray
+                    )
+                }
+
+                if (telemetry.topDomains.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Top Domains: " + telemetry.topDomains.take(3).joinToString(", ") { "${it.first} (${it.second})" },
+                        fontSize = 11.sp,
+                        color = Color.LightGray
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onCopyReport,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                ) {
+                    Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Copy Diagnostic Report", fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MetricItem(title: String, value: String) {
+    Column {
+        Text(text = title, fontSize = 11.sp, color = Color.Gray)
+        Text(text = value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
     }
 }

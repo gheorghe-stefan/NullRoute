@@ -257,10 +257,14 @@ class DnsVpnService : VpnService() {
             if (qCount > 0) {
                 val (domain, endOffset) = parseDomain(buffer, dnsOffset + 12)
                 if (domain.isNotEmpty()) {
+                    val qType = if (endOffset + 2 <= length) getShort(buffer, endOffset) else 1
+                    DnsTelemetryTracker.recordQuery(domain, qType)
+
                     val clientIp = ByteArray(4)
                     System.arraycopy(buffer, 12, clientIp, 0, 4) // Source IP
 
                     if (isDomainBlocked(domain)) {
+                        DnsTelemetryTracker.recordBlockedQuery()
                         // Return NXDOMAIN (Name Error)
                         val dnsQuestionLen = endOffset + 4 - dnsOffset
                         val responseDns = ByteArray(dnsQuestionLen)
@@ -283,10 +287,12 @@ class DnsVpnService : VpnService() {
                             outputStream.write(responsePacket)
                         }
                     } else {
+                        DnsTelemetryTracker.recordAllowedQuery()
                         // Check In-Memory DNS Cache first
                         val now = System.currentTimeMillis()
                         val cached = dnsResponseCache[domain]
                         if (cached != null && (now - cached.timestampMs) < DNS_CACHE_TTL_MS) {
+                            DnsTelemetryTracker.recordCacheHit()
                             // Instant response from cache! Overwrite Transaction ID
                             val cachedPayload = cached.payload.copyOf()
                             cachedPayload[0] = buffer[dnsOffset]
@@ -306,11 +312,13 @@ class DnsVpnService : VpnService() {
                             return
                         }
 
+                        DnsTelemetryTracker.recordCacheMiss()
                         // Forward query to Google Public DNS using persistent protected socket
                         val dnsQuery = ByteArray(dnsLen)
                         System.arraycopy(buffer, dnsOffset, dnsQuery, 0, dnsLen)
 
                         dnsExecutor.submit {
+                            val startQueryTime = System.currentTimeMillis()
                             try {
                                 val socket = getOrCreateForwardingSocket() ?: return@submit
                                 val forwardPacket = DatagramPacket(
@@ -319,12 +327,19 @@ class DnsVpnService : VpnService() {
                                     InetAddress.getByName("8.8.8.8"),
                                     53
                                 )
+                                val lockWaitStart = System.currentTimeMillis()
                                 synchronized(socket) {
+                                    val lockWaitEnd = System.currentTimeMillis()
+                                    DnsTelemetryTracker.recordLockWait(lockWaitEnd - lockWaitStart)
+
                                     socket.send(forwardPacket)
 
                                     val responseBuf = ByteArray(2048)
                                     val receivePacket = DatagramPacket(responseBuf, responseBuf.size)
                                     socket.receive(receivePacket)
+
+                                    val queryLatency = System.currentTimeMillis() - startQueryTime
+                                    DnsTelemetryTracker.recordLatency(queryLatency)
 
                                     val receivedPayload = ByteArray(receivePacket.length)
                                     System.arraycopy(responseBuf, 0, receivedPayload, 0, receivePacket.length)
@@ -345,8 +360,12 @@ class DnsVpnService : VpnService() {
                                         outputStream.write(ipUdpResponse)
                                     }
                                 }
+                            } catch (e: java.net.SocketTimeoutException) {
+                                DnsTelemetryTracker.recordTimeout()
+                                Log.w(TAG, "DNS IPv4 resolution timeout for: $domain")
                             } catch (e: Exception) {
-                                Log.w(TAG, "DNS IPv4 resolution failed/timeout for: $domain")
+                                DnsTelemetryTracker.recordNetworkError()
+                                Log.w(TAG, "DNS IPv4 resolution failed for: $domain", e)
                             }
                         }
                     }
@@ -375,10 +394,14 @@ class DnsVpnService : VpnService() {
             if (qCount > 0) {
                 val (domain, endOffset) = parseDomain(buffer, dnsOffset + 12)
                 if (domain.isNotEmpty()) {
+                    val qType = if (endOffset + 2 <= length) getShort(buffer, endOffset) else 1
+                    DnsTelemetryTracker.recordQuery(domain, qType)
+
                     val clientIp = ByteArray(16)
                     System.arraycopy(buffer, 8, clientIp, 0, 16) // Source IP is at offset 8 to 23
 
                     if (isDomainBlocked(domain)) {
+                        DnsTelemetryTracker.recordBlockedQuery()
                         // Return NXDOMAIN
                         val dnsQuestionLen = endOffset + 4 - dnsOffset
                         val responseDns = ByteArray(dnsQuestionLen)
@@ -400,10 +423,12 @@ class DnsVpnService : VpnService() {
                             outputStream.write(responsePacket)
                         }
                     } else {
+                        DnsTelemetryTracker.recordAllowedQuery()
                         // Check In-Memory DNS Cache first
                         val now = System.currentTimeMillis()
                         val cached = dnsResponseCache[domain]
                         if (cached != null && (now - cached.timestampMs) < DNS_CACHE_TTL_MS) {
+                            DnsTelemetryTracker.recordCacheHit()
                             val cachedPayload = cached.payload.copyOf()
                             cachedPayload[0] = buffer[dnsOffset]
                             cachedPayload[1] = buffer[dnsOffset + 1]
@@ -422,11 +447,13 @@ class DnsVpnService : VpnService() {
                             return
                         }
 
+                        DnsTelemetryTracker.recordCacheMiss()
                         // Forward query to Google Public IPv6 DNS: [2001:4860:4860::8888]
                         val dnsQuery = ByteArray(dnsLen)
                         System.arraycopy(buffer, dnsOffset, dnsQuery, 0, dnsLen)
 
                         dnsExecutor.submit {
+                            val startQueryTime = System.currentTimeMillis()
                             try {
                                 val socket = getOrCreateForwardingSocket() ?: return@submit
                                 val forwardPacket = DatagramPacket(
@@ -435,12 +462,19 @@ class DnsVpnService : VpnService() {
                                     InetAddress.getByName("2001:4860:4860::8888"),
                                     53
                                 )
+                                val lockWaitStart = System.currentTimeMillis()
                                 synchronized(socket) {
+                                    val lockWaitEnd = System.currentTimeMillis()
+                                    DnsTelemetryTracker.recordLockWait(lockWaitEnd - lockWaitStart)
+
                                     socket.send(forwardPacket)
 
                                     val responseBuf = ByteArray(2048)
                                     val receivePacket = DatagramPacket(responseBuf, responseBuf.size)
                                     socket.receive(receivePacket)
+
+                                    val queryLatency = System.currentTimeMillis() - startQueryTime
+                                    DnsTelemetryTracker.recordLatency(queryLatency)
 
                                     val receivedPayload = ByteArray(receivePacket.length)
                                     System.arraycopy(responseBuf, 0, receivedPayload, 0, receivePacket.length)
@@ -460,8 +494,12 @@ class DnsVpnService : VpnService() {
                                         outputStream.write(ipV6Response)
                                     }
                                 }
+                            } catch (e: java.net.SocketTimeoutException) {
+                                DnsTelemetryTracker.recordTimeout()
+                                Log.w(TAG, "DNS IPv6 resolution timeout for: $domain")
                             } catch (e: Exception) {
-                                Log.w(TAG, "DNS IPv6 resolution failed/timeout for: $domain")
+                                DnsTelemetryTracker.recordNetworkError()
+                                Log.w(TAG, "DNS IPv6 resolution failed for: $domain", e)
                             }
                         }
                     }

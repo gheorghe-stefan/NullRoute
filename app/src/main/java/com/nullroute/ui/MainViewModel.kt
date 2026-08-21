@@ -32,6 +32,16 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     private val _blockedDomains = MutableStateFlow<List<BlockedDomain>>(emptyList())
     val blockedDomains: StateFlow<List<BlockedDomain>> = _blockedDomains.asStateFlow()
 
+    val telemetrySnapshot: StateFlow<com.nullroute.vpn.TelemetrySnapshot> = com.nullroute.vpn.DnsTelemetryTracker.snapshot
+
+    fun updateTelemetry() {
+        com.nullroute.vpn.DnsTelemetryTracker.updateSnapshot()
+    }
+
+    fun getExportTelemetryReport(): String {
+        return com.nullroute.vpn.DnsTelemetryTracker.generateExportReport()
+    }
+
     init {
         loadData()
         viewModelScope.launch(Dispatchers.Default) {
