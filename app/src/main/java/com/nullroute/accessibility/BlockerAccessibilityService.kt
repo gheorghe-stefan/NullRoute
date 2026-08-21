@@ -22,10 +22,13 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (packageName == "com.android.settings" || packageName.contains("packageinstaller", ignoreCase = true)) {
                 val rootNode = rootInActiveWindow ?: return
                 if (detectAttemptToDisable(rootNode)) {
-                    // Redirect back to Home screen to prevent disabling or uninstalling
+                    // 1. Pop the forbidden App Info / Uninstall page off the Settings backstack
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+
+                    // 2. Redirect back to Home screen to prevent disabling or uninstalling
                     performGlobalAction(GLOBAL_ACTION_HOME)
 
-                    // Launch Main Screen displaying warning message
+                    // 3. Launch Main Screen displaying warning message
                     val intent = Intent(this, MainActivity::class.java).apply {
                         flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                         putExtra("BLOCKED_ATTEMPT", true)
