@@ -254,7 +254,7 @@ object DnsTelemetryTracker {
         sb.appendLine("=== NULLROUTE TELEMETRY DIAGNOSTIC REPORT ===")
         sb.appendLine("Started At: $startDateStr")
         sb.appendLine("Report Time: $nowStr (Uptime: ${snap.uptimeSeconds}s)")
-        sb.appendLine("App Version: 1.2.9")
+        sb.appendLine("App Version: 1.3.0")
         sb.appendLine()
         sb.appendLine("[1] Throughput & Load")
         sb.appendLine("  Total Queries Intercepted : ${snap.totalQueries}")
