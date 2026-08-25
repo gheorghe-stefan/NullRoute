@@ -19,6 +19,7 @@ import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -29,7 +30,7 @@ class DnsVpnService : VpnService() {
 
     companion object {
         private const val TAG = "NullRouteVPN"
-        private const val MIN_CACHE_TTL_MS = 30_000L     // Minimum 30 seconds
+        private const val MIN_CACHE_TTL_MS = 60_000L     // Minimum 60 seconds TTL floor
         private const val MAX_CACHE_TTL_MS = 3600_000L   // Maximum 1 hour
         private const val QUERY_TIMEOUT_MS = 2000L      // 2 seconds before fast-fail
 
@@ -398,9 +399,9 @@ class DnsVpnService : VpnService() {
                 val payload = ByteArray(length)
                 System.arraycopy(recvBuffer, 0, payload, 0, length)
 
-                // Parse upstream TTL dynamically (clamp between 30s and 3600s)
+                // Parse upstream TTL dynamically (clamped between 60s and 3600s)
                 val ttlMs = extractDnsTtlMs(payload, length)
-                dnsResponseCache[DnsCacheKey(query.domain, query.qType)] = CachedDnsResponse(
+                dnsResponseCache[DnsCacheKey(query.domain.lowercase(Locale.US), query.qType)] = CachedDnsResponse(
                     timestampMs = System.currentTimeMillis(),
                     ttlMs = ttlMs,
                     payload = payload
@@ -533,8 +534,8 @@ class DnsVpnService : VpnService() {
                     } else {
                         DnsTelemetryTracker.recordAllowedQuery()
 
-                        // Check Type-Aware Cache: (Domain, QType)
-                        val cacheKey = DnsCacheKey(domain, qType)
+                        // Check Case-Insensitive, Type-Aware Cache: (domain.lowercase(), qType)
+                        val cacheKey = DnsCacheKey(domain.lowercase(Locale.US), qType)
                         val now = System.currentTimeMillis()
                         val cached = dnsResponseCache[cacheKey]
                         if (cached != null && (now - cached.timestampMs) < cached.ttlMs) {
@@ -542,6 +543,12 @@ class DnsVpnService : VpnService() {
                             val cachedPayload = cached.payload.copyOf()
                             cachedPayload[0] = (clientTid.toInt() shr 8).toByte()
                             cachedPayload[1] = (clientTid.toInt() and 0xFF).toByte()
+
+                            // Echo back the exact question section casing requested by the client (0x20 bit matching)
+                            val dnsQuestionLen = endOffset + 4 - dnsOffset
+                            if (dnsQuestionLen > 12 && 12 + (dnsQuestionLen - 12) <= cachedPayload.size) {
+                                System.arraycopy(buffer, dnsOffset + 12, cachedPayload, 12, dnsQuestionLen - 12)
+                            }
 
                             val ipUdpResponse = buildIpUdpPacket(
                                 srcIp = byteArrayOf(10, 0, 0, 1),
@@ -661,8 +668,8 @@ class DnsVpnService : VpnService() {
                     } else {
                         DnsTelemetryTracker.recordAllowedQuery()
 
-                        // Check Type-Aware Cache: (Domain, QType)
-                        val cacheKey = DnsCacheKey(domain, qType)
+                        // Check Case-Insensitive, Type-Aware Cache: (domain.lowercase(), qType)
+                        val cacheKey = DnsCacheKey(domain.lowercase(Locale.US), qType)
                         val now = System.currentTimeMillis()
                         val cached = dnsResponseCache[cacheKey]
                         if (cached != null && (now - cached.timestampMs) < cached.ttlMs) {
@@ -670,6 +677,12 @@ class DnsVpnService : VpnService() {
                             val cachedPayload = cached.payload.copyOf()
                             cachedPayload[0] = (clientTid.toInt() shr 8).toByte()
                             cachedPayload[1] = (clientTid.toInt() and 0xFF).toByte()
+
+                            // Echo back the exact question section casing requested by the client (0x20 bit matching)
+                            val dnsQuestionLen = endOffset + 4 - dnsOffset
+                            if (dnsQuestionLen > 12 && 12 + (dnsQuestionLen - 12) <= cachedPayload.size) {
+                                System.arraycopy(buffer, dnsOffset + 12, cachedPayload, 12, dnsQuestionLen - 12)
+                            }
 
                             val ipV6Response = buildIpV6UdpPacket(
                                 srcIp = IPV6_DNS_SERVER,
@@ -734,16 +747,32 @@ class DnsVpnService : VpnService() {
             dnsQuery[1] = (upstreamTid.toInt() and 0xFF).toByte()
 
             var sendSuccess = false
-            val upstreams = arrayOf(PRIMARY_UPSTREAM_V4, SECONDARY_UPSTREAM_V4, TERTIARY_UPSTREAM_V4)
 
-            for (upstream in upstreams) {
+            // Parallel Dual-Upstream Race: Send to Google (8.8.8.8) and Cloudflare (1.1.1.1) simultaneously
+            try {
+                val p1 = DatagramPacket(dnsQuery, dnsLen, PRIMARY_UPSTREAM_V4, 53)
+                socket.send(p1)
+                sendSuccess = true
+            } catch (e: IOException) {
+                // Secondary will attempt
+            }
+
+            try {
+                val p2 = DatagramPacket(dnsQuery, dnsLen, SECONDARY_UPSTREAM_V4, 53)
+                socket.send(p2)
+                sendSuccess = true
+            } catch (e: IOException) {
+                // Ignore
+            }
+
+            if (!sendSuccess) {
+                // Fallback to tertiary upstream
                 try {
-                    val forwardPacket = DatagramPacket(dnsQuery, dnsLen, upstream, 53)
-                    socket.send(forwardPacket) // Non-blocking send!
+                    val p3 = DatagramPacket(dnsQuery, dnsLen, TERTIARY_UPSTREAM_V4, 53)
+                    socket.send(p3)
                     sendSuccess = true
-                    break
                 } catch (e: IOException) {
-                    // Try next upstream
+                    // All upstreams failed
                 }
             }
 
