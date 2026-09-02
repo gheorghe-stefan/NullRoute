@@ -46,12 +46,12 @@ val currentBuildNumber = getAndIncrementBuildNumber()
 
 android {
     namespace = "com.nullroute"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.nullroute"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = currentBuildNumber
         versionName = "1.0.0"
 
@@ -135,7 +135,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     // Billing
-    implementation("com.android.billingclient:billing-ktx:6.2.1")
+    implementation("com.android.billingclient:billing:8.0.0")
 
     // Testing
     testImplementation("junit:junit:4.13.2")
