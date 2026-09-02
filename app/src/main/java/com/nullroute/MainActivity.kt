@@ -574,9 +574,11 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
             // Display Blocked List
             if (blockedDomains.isNotEmpty()) {
                 items(blockedDomains) { domainItem ->
+                    val canRemove = domainItem.isRemovable || !isPro
                     DomainItem(
                         domain = domainItem,
-                        onRemove = if (domainItem.isRemovable) {
+                        isPro = isPro,
+                        onRemove = if (canRemove) {
                             {
                                 val success = viewModel.removeDomain(domainItem.domain)
                                 if (success && isVpnActive) {
@@ -642,6 +644,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
 @Composable
 fun DomainItem(
     domain: BlockedDomain,
+    isPro: Boolean = true,
     onRemove: (() -> Unit)? = null
 ) {
     var isRevealed by rememberSaveable { mutableStateOf(false) }
@@ -675,8 +678,9 @@ fun DomainItem(
                     )
                 }
                 Spacer(modifier = Modifier.height(2.dp))
-                val badgeText = if (domain.isRemovable) "Removable" else "Permanent (Forever)"
-                val badgeColor = if (domain.isRemovable) MaterialTheme.colorScheme.primary else Color(0xFFF59E0B)
+                val isForever = !domain.isRemovable && isPro
+                val badgeText = if (isForever) "Permanent (Forever)" else "Removable"
+                val badgeColor = if (isForever) Color(0xFFF59E0B) else MaterialTheme.colorScheme.primary
                 Text(
                     text = badgeText,
                     fontSize = 11.sp,
@@ -688,7 +692,7 @@ fun DomainItem(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                if (domain.isRemovable && onRemove != null) {
+                if (onRemove != null) {
                     IconButton(
                         onClick = onRemove,
                         modifier = Modifier.size(36.dp)

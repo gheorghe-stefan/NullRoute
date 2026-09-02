@@ -115,7 +115,7 @@ class MainViewModel(
     }
 
     fun removeDomain(domain: String): Boolean {
-        val success = repository.removeBlockedDomain(domain)
+        val success = repository.removeBlockedDomain(domain, force = !isPro.value)
         if (success) {
             loadData()
         }

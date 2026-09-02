@@ -9,7 +9,7 @@ interface BlocklistRepository {
     fun getBlockedDomainStrings(): Set<String>
     fun addBlockedDomain(domain: String, isRemovable: Boolean = true): Boolean
     fun addBlockedDomains(domains: List<String>, isRemovable: Boolean = true): Int
-    fun removeBlockedDomain(domain: String): Boolean
+    fun removeBlockedDomain(domain: String, force: Boolean = false): Boolean
 }
 
 class FileBlocklistRepository(private val context: Context) : BlocklistRepository {
@@ -106,15 +106,15 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
         }
     }
 
-    override fun removeBlockedDomain(domain: String): Boolean {
+    override fun removeBlockedDomain(domain: String, force: Boolean): Boolean {
         val normalized = DomainNormalizer.normalize(domain) ?: return false
 
         return synchronized(this) {
             val list = getBlockedDomains().toMutableList()
             val target = list.find { it.domain == normalized } ?: return@synchronized false
             
-            // Non-removable domain cannot be removed
-            if (!target.isRemovable) {
+            // Non-removable domain cannot be removed unless force = true (e.g. Free tier downgrade)
+            if (!target.isRemovable && !force) {
                 return@synchronized false
             }
 

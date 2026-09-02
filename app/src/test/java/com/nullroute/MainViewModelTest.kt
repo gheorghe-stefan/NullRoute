@@ -46,10 +46,10 @@ class MainViewModelTest {
             return count
         }
 
-        override fun removeBlockedDomain(domain: String): Boolean {
+        override fun removeBlockedDomain(domain: String, force: Boolean): Boolean {
             val normalized = com.nullroute.utils.DomainNormalizer.normalize(domain) ?: return false
             val item = domains.find { it.domain == normalized } ?: return false
-            if (!item.isRemovable) return false
+            if (!item.isRemovable && !force) return false
             return domains.remove(item)
         }
     }
@@ -153,11 +153,18 @@ class MainViewModelTest {
 
     @Test
     fun testAddDomainPermanent() {
+        mockBillingProvider.setPro(true)
         assertTrue(viewModel.addDomain("instagram.com", isRemovable = false))
         assertEquals(1, viewModel.blockedDomains.value.size)
         assertFalse(viewModel.blockedDomains.value[0].isRemovable)
+        // In Pro mode, cannot remove permanent domain
         assertFalse(viewModel.removeDomain("instagram.com"))
         assertEquals(1, viewModel.blockedDomains.value.size)
+
+        // In Free mode (downgrade/refund), user is allowed to remove it
+        mockBillingProvider.setPro(false)
+        assertTrue(viewModel.removeDomain("instagram.com"))
+        assertEquals(0, viewModel.blockedDomains.value.size)
     }
 
     @Test
