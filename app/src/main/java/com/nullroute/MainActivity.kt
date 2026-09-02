@@ -144,6 +144,13 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         }
     }
 
+    // Sync running VPN service whenever Pro status toggles
+    LaunchedEffect(isPro) {
+        if (isVpnActive) {
+            context.startService(Intent(context, DnsVpnService::class.java))
+        }
+    }
+
     // VPN Permission Launcher
     val vpnLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()

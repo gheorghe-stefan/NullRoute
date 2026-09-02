@@ -60,6 +60,11 @@ class MainViewModel(
     init {
         loadData()
         viewModelScope.launch(Dispatchers.Default) {
+            billingManager.isPro.collect {
+                loadData()
+            }
+        }
+        viewModelScope.launch(Dispatchers.Default) {
             com.nullroute.vpn.VpnStateTracker.isRunning.collect { running ->
                 _isVpnActive.value = running
             }
@@ -67,7 +72,8 @@ class MainViewModel(
     }
 
     fun loadData() {
-        _blockedDomains.value = repository.getBlockedDomains()
+        val allDomains = repository.getBlockedDomains()
+        _blockedDomains.value = if (isPro.value) allDomains else allDomains.take(FREE_DOMAIN_LIMIT)
     }
 
     fun refreshStates(context: Context) {

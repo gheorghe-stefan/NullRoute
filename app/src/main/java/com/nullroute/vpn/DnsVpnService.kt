@@ -161,8 +161,12 @@ class DnsVpnService : VpnService() {
 
     private fun reloadBlockedDomainsCache() {
         try {
-            cachedBlockedDomains = repository.getBlockedDomainStrings()
-            Log.d(TAG, "Reloaded in-memory blocklist cache: ${cachedBlockedDomains.size} domains")
+            val isPro = getSharedPreferences("nullroute_billing_prefs", Context.MODE_PRIVATE)
+                .getBoolean("pro_unlocked", false)
+            val allDomains = repository.getBlockedDomains()
+            val activeDomains = if (isPro) allDomains else allDomains.take(2)
+            cachedBlockedDomains = activeDomains.map { it.domain }.toSet()
+            Log.d(TAG, "Reloaded in-memory blocklist cache: ${cachedBlockedDomains.size} domains (isPro=$isPro)")
         } catch (e: Exception) {
             Log.e(TAG, "Error reloading blocklist cache", e)
         }

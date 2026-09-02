@@ -178,4 +178,31 @@ class MainViewModelTest {
     fun testRemoveNonExistentDomainFails() {
         assertFalse(viewModel.removeDomain("twitter.com"))
     }
+
+    @Test
+    fun testDowngradeToFreeTierCapsActiveDomainsToTwo() {
+        mockBillingProvider.setPro(true)
+        viewModel.addDomain("site1.com")
+        viewModel.addDomain("site2.com")
+        viewModel.addDomain("site3.com")
+        viewModel.addDomain("site4.com")
+        assertEquals(4, viewModel.blockedDomains.value.size)
+
+        // Downgrade to Free tier (e.g. refunded or revoked)
+        mockBillingProvider.setPro(false)
+        viewModel.loadData()
+
+        // App only exposes the first 2 domains
+        assertEquals(2, viewModel.blockedDomains.value.size)
+        assertEquals("site1.com", viewModel.blockedDomains.value[0].domain)
+        assertEquals("site2.com", viewModel.blockedDomains.value[1].domain)
+
+        // Underlying repository retains full list
+        assertEquals(4, mockRepository.domains.size)
+
+        // Upgrade back to Pro restores full list
+        mockBillingProvider.setPro(true)
+        viewModel.loadData()
+        assertEquals(4, viewModel.blockedDomains.value.size)
+    }
 }
