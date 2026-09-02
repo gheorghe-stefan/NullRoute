@@ -8,6 +8,7 @@ interface BlocklistRepository {
     fun getBlockedDomains(): List<BlockedDomain>
     fun getBlockedDomainStrings(): Set<String>
     fun addBlockedDomain(domain: String, isRemovable: Boolean = true): Boolean
+    fun addBlockedDomains(domains: List<String>, isRemovable: Boolean = true): Int
     fun removeBlockedDomain(domain: String): Boolean
 }
 
@@ -74,6 +75,34 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
             } catch (e: Exception) {
                 false
             }
+        }
+    }
+
+    override fun addBlockedDomains(domains: List<String>, isRemovable: Boolean): Int {
+        return synchronized(this) {
+            val existing = getBlockedDomainStrings().toMutableSet()
+            val list = getBlockedDomains().toMutableList()
+            var addedCount = 0
+
+            for (domain in domains) {
+                val normalized = DomainNormalizer.normalize(domain) ?: continue
+                if (!existing.contains(normalized)) {
+                    list.add(BlockedDomain(domain = normalized, isRemovable = isRemovable))
+                    existing.add(normalized)
+                    addedCount++
+                }
+            }
+
+            if (addedCount > 0) {
+                try {
+                    file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
+                    cachedDomains = list
+                    lastModifiedTime = file.lastModified()
+                } catch (e: Exception) {
+                    return@synchronized 0
+                }
+            }
+            addedCount
         }
     }
 

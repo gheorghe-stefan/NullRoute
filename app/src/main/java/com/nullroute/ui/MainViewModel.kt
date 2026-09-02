@@ -1,21 +1,31 @@
 package com.nullroute.ui
 
+import android.app.Activity
 import android.content.Context
-import android.net.VpnService
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.nullroute.accessibility.BlockerAccessibilityService
+import com.nullroute.billing.BillingManager
+import com.nullroute.billing.BillingProvider
 import com.nullroute.data.BlockedDomain
 import com.nullroute.data.BlocklistRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
+class MainViewModel(
+    private val repository: BlocklistRepository,
+    private val billingManager: BillingProvider
+) : ViewModel() {
+
+    companion object {
+        const val FREE_DOMAIN_LIMIT = 2
+    }
 
     private val _isVpnActive = MutableStateFlow(false)
     val isVpnActive: StateFlow<Boolean> = _isVpnActive.asStateFlow()
@@ -31,6 +41,11 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
 
     private val _blockedDomains = MutableStateFlow<List<BlockedDomain>>(emptyList())
     val blockedDomains: StateFlow<List<BlockedDomain>> = _blockedDomains.asStateFlow()
+
+    // Billing integration
+    val isPro: StateFlow<Boolean> = billingManager.isPro
+    val proPrice: StateFlow<String> = billingManager.proPrice
+    val billingMessage: SharedFlow<String> = billingManager.userMessage
 
     val telemetrySnapshot: StateFlow<com.nullroute.vpn.TelemetrySnapshot> = com.nullroute.vpn.DnsTelemetryTracker.snapshot
 
@@ -62,6 +77,16 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
         val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
         _isPermanentLockActive.value = prefs.getBoolean("permanent_lock", false)
         _isBypassProtectionActive.value = prefs.getBoolean("bypass_protection", false)
+
+        billingManager.queryPurchases()
+    }
+
+    fun canAddDomain(): Boolean {
+        return isPro.value || _blockedDomains.value.size < FREE_DOMAIN_LIMIT
+    }
+
+    fun canUsePermanentLock(): Boolean {
+        return isPro.value
     }
 
     fun addDomain(domain: String, isRemovable: Boolean = true): Boolean {
@@ -70,6 +95,17 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
             loadData()
         }
         return success
+    }
+
+    fun addPresetDomains(domains: List<String>): Int {
+        if (!isPro.value) {
+            return -1 // Pro required
+        }
+        val added = repository.addBlockedDomains(domains, isRemovable = true)
+        if (added > 0) {
+            loadData()
+        }
+        return added
     }
 
     fun removeDomain(domain: String): Boolean {
@@ -92,6 +128,19 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
         _isBypassProtectionActive.value = bypass
     }
 
+    // Billing actions
+    fun launchPurchaseFlow(activity: Activity) {
+        billingManager.launchPurchaseFlow(activity)
+    }
+
+    fun restorePurchases() {
+        billingManager.restorePurchases()
+    }
+
+    fun debugTogglePro(): Boolean {
+        return billingManager.debugTogglePro()
+    }
+
     private fun isAccessibilityEnabled(context: Context): Boolean {
         val serviceName = context.packageName + "/" + BlockerAccessibilityService::class.java.name
         val enabledServices = Settings.Secure.getString(
@@ -102,11 +151,14 @@ class MainViewModel(private val repository: BlocklistRepository) : ViewModel() {
     }
 }
 
-class MainViewModelFactory(private val repository: BlocklistRepository) : ViewModelProvider.Factory {
+class MainViewModelFactory(
+    private val repository: BlocklistRepository,
+    private val billingProvider: BillingProvider
+) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return MainViewModel(repository) as T
+            return MainViewModel(repository, billingProvider) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

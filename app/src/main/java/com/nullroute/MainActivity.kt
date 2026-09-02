@@ -36,19 +36,28 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nullroute.billing.BillingManager
 import com.nullroute.data.BlockedDomain
 import com.nullroute.data.SharedPreferencesBlocklistRepository
 import com.nullroute.ui.MainViewModel
 import com.nullroute.ui.MainViewModelFactory
+import com.nullroute.ui.ProUpgradeDialog
 import com.nullroute.utils.DomainNormalizer
 import com.nullroute.vpn.DnsVpnService
 
 class MainActivity : ComponentActivity() {
 
+    private lateinit var billingManager: BillingManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.nullroute.vpn.DnsTelemetryTracker.init(applicationContext)
+
+        billingManager = BillingManager(applicationContext, lifecycleScope)
 
         // Clear bypass protection preference in release/final version to enforce strict locking
         val isDebuggable = (applicationContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -65,7 +74,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             NullRouteTheme {
                 val repository = remember { SharedPreferencesBlocklistRepository(applicationContext) }
-                val factory = remember { MainViewModelFactory(repository) }
+                val factory = remember { MainViewModelFactory(repository, billingManager) }
                 val viewModel: MainViewModel = viewModel(factory = factory)
 
                 MainScreen(viewModel, isBlockedAttempt)
@@ -78,6 +87,13 @@ class MainActivity : ComponentActivity() {
         val isBlockedAttempt = intent.getBooleanExtra("BLOCKED_ATTEMPT", false)
         if (isBlockedAttempt) {
             Toast.makeText(this, "Self-sabotage blocked! Focus mode is active.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (::billingManager.isInitialized) {
+            billingManager.endConnection()
         }
     }
 }
@@ -110,10 +126,20 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     val isAccessibilityActive by viewModel.isAccessibilityActive.collectAsState()
     val blockedDomains by viewModel.blockedDomains.collectAsState()
     val telemetry by viewModel.telemetrySnapshot.collectAsState()
+    val isPro by viewModel.isPro.collectAsState()
+    val proPrice by viewModel.proPrice.collectAsState()
 
     var domainInput by remember { mutableStateOf("") }
     var showBlockedToast by remember { mutableStateOf(initialBlockedAttempt) }
     var pendingDomainToAdd by remember { mutableStateOf<String?>(null) }
+    var showProDialog by remember { mutableStateOf(false) }
+
+    // Listen for billing event messages (purchases, errors, debug toggle)
+    LaunchedEffect(Unit) {
+        viewModel.billingMessage.collect { msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     // Refresh states on app resume
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -172,18 +198,23 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                     onClick = {
                         val domain = pendingDomainToAdd!!
                         pendingDomainToAdd = null
-                        val success = viewModel.addDomain(domain, isRemovable = false)
-                        if (success) {
-                            domainInput = ""
-                            if (isVpnActive) {
-                                context.startService(Intent(context, DnsVpnService::class.java))
-                            }
+                        if (!viewModel.canUsePermanentLock()) {
+                            Toast.makeText(context, "Permanent (Forever) mode requires NullRoute Pro", Toast.LENGTH_SHORT).show()
+                            showProDialog = true
                         } else {
-                            Toast.makeText(context, "Failed to add domain (duplicate or invalid)", Toast.LENGTH_SHORT).show()
+                            val success = viewModel.addDomain(domain, isRemovable = false)
+                            if (success) {
+                                domainInput = ""
+                                if (isVpnActive) {
+                                    context.startService(Intent(context, DnsVpnService::class.java))
+                                }
+                            } else {
+                                Toast.makeText(context, "Failed to add domain (duplicate or invalid)", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                 ) {
-                    Text("Yes (Forever)")
+                    Text(if (isPro) "Yes (Forever)" else "Yes (Forever) 🔒")
                 }
             },
             dismissButton = {
@@ -212,11 +243,52 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        "NullRoute",
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "NullRoute",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        if (isPro) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = Color(0xFFF59E0B).copy(alpha = 0.2f),
+                                border = BorderStroke(1.dp, Color(0xFFF59E0B))
+                            ) {
+                                Text(
+                                    text = "PRO",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFFF59E0B),
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                },
+                actions = {
+                    if (!isPro) {
+                        FilledTonalButton(
+                            onClick = { showProDialog = true },
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                contentColor = MaterialTheme.colorScheme.primary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FlashOn,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Unlock Pro", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
@@ -350,6 +422,30 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 )
             }
 
+            // 1-Click Distraction Presets
+            item {
+                PresetPacksCard(
+                    isPro = isPro,
+                    onSelectPreset = { presetName, domains ->
+                        if (!isPro) {
+                            Toast.makeText(context, "1-Click Presets require NullRoute Pro", Toast.LENGTH_SHORT).show()
+                            showProDialog = true
+                        } else {
+                            val added = viewModel.addPresetDomains(domains)
+                            if (added > 0) {
+                                Toast.makeText(context, "Added $added domains from $presetName pack!", Toast.LENGTH_SHORT).show()
+                                if (isVpnActive) {
+                                    context.startService(Intent(context, DnsVpnService::class.java))
+                                }
+                            } else {
+                                Toast.makeText(context, "Preset domains already added", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    onUpgradeClick = { showProDialog = true }
+                )
+            }
+
             // Blocklist Custom Management Header
             item {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -358,12 +454,22 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val domainHeaderLabel = when {
+                        isPro -> "Blocked Domains (${blockedDomains.size} • Unlimited)"
+                        blockedDomains.size > MainViewModel.FREE_DOMAIN_LIMIT -> "Blocked Domains (${blockedDomains.size}) • Free limit: ${MainViewModel.FREE_DOMAIN_LIMIT}"
+                        else -> "Blocked Domains (${blockedDomains.size}/${MainViewModel.FREE_DOMAIN_LIMIT})"
+                    }
                     Text(
-                        text = "Blocked Domains",
+                        text = domainHeaderLabel,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground
                     )
+                    if (!isPro) {
+                        TextButton(onClick = { showProDialog = true }) {
+                            Text("Upgrade", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
                 }
             }
 
@@ -390,6 +496,13 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                                 Toast.makeText(context, "Invalid domain format", Toast.LENGTH_SHORT).show()
                             } else if (viewModel.blockedDomains.value.any { it.domain.equals(normalized, ignoreCase = true) }) {
                                 Toast.makeText(context, "Domain is already blocked", Toast.LENGTH_SHORT).show()
+                            } else if (!viewModel.canAddDomain()) {
+                                Toast.makeText(
+                                    context,
+                                    "Free tier limit reached (${MainViewModel.FREE_DOMAIN_LIMIT} domains). Upgrade to Pro for unlimited domains!",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                showProDialog = true
                             } else {
                                 pendingDomainToAdd = normalized
                             }
@@ -442,6 +555,26 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
         }
+    }
+
+    if (showProDialog) {
+        val activity = context as? Activity
+        ProUpgradeDialog(
+            price = proPrice,
+            isPro = isPro,
+            onDismiss = { showProDialog = false },
+            onUnlockClick = {
+                if (activity != null) {
+                    viewModel.launchPurchaseFlow(activity)
+                }
+            },
+            onRestoreClick = {
+                viewModel.restorePurchases()
+            },
+            onDebugToggleClick = {
+                viewModel.debugTogglePro()
+            }
+        )
     }
 }
 
@@ -636,3 +769,124 @@ fun MetricItem(title: String, value: String) {
         Text(text = value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
     }
 }
+
+@Composable
+fun PresetPacksCard(
+    isPro: Boolean,
+    onSelectPreset: (String, List<String>) -> Unit,
+    onUpgradeClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FlashOn,
+                        contentDescription = null,
+                        tint = if (isPro) MaterialTheme.colorScheme.primary else Color.Gray,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "1-Click Focus Presets",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                if (!isPro) {
+                    Surface(
+                        onClick = onUpgradeClick,
+                        shape = RoundedCornerShape(4.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = "PRO",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Instantly block common high-distraction ecosystems:",
+                fontSize = 12.sp,
+                color = Color.Gray
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PresetChip(
+                    title = "Socials",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onSelectPreset(
+                            "Socials",
+                            listOf("instagram.com", "tiktok.com", "reddit.com", "x.com", "facebook.com")
+                        )
+                    }
+                )
+                PresetChip(
+                    title = "Video Feeds",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onSelectPreset(
+                            "Video Feeds",
+                            listOf("youtube.com", "twitch.tv", "netflix.com")
+                        )
+                    }
+                )
+                PresetChip(
+                    title = "Doomscroll",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onSelectPreset(
+                            "Doomscroll",
+                            listOf("news.ycombinator.com", "cnn.com", "bbc.com")
+                        )
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PresetChip(
+    title: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(10.dp),
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = title,
+            fontSize = 11.sp,
+            maxLines = 1,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
