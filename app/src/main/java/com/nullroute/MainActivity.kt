@@ -38,11 +38,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nullroute.billing.BillingManager
 import com.nullroute.data.BlockedDomain
 import com.nullroute.data.SharedPreferencesBlocklistRepository
+import com.nullroute.ui.HelpDialog
 import com.nullroute.ui.MainViewModel
 import com.nullroute.ui.MainViewModelFactory
 import com.nullroute.ui.ProUpgradeDialog
@@ -133,11 +135,37 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     var showBlockedToast by remember { mutableStateOf(initialBlockedAttempt) }
     var pendingDomainToAdd by remember { mutableStateOf<String?>(null) }
     var showProDialog by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
 
     // Listen for billing event messages (purchases, errors, debug toggle)
     LaunchedEffect(Unit) {
         viewModel.billingMessage.collect { msg ->
             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // VPN Permission Launcher
+    val vpnLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            context.startService(Intent(context, DnsVpnService::class.java))
+            viewModel.refreshStates(context)
+        } else {
+            Toast.makeText(context, "VPN Permission Denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Auto-prompt VPN permission on app launch if not active
+    LaunchedEffect(Unit) {
+        if (!viewModel.isVpnActive.value) {
+            val prepareIntent = VpnService.prepare(context)
+            if (prepareIntent != null) {
+                vpnLauncher.launch(prepareIntent)
+            } else {
+                context.startService(Intent(context, DnsVpnService::class.java))
+                viewModel.refreshStates(context)
+            }
         }
     }
 
@@ -153,18 +181,6 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
-
-    // VPN Permission Launcher
-    val vpnLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            context.startService(Intent(context, DnsVpnService::class.java))
-            viewModel.refreshStates(context)
-        } else {
-            Toast.makeText(context, "VPN Permission Denied", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -278,7 +294,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                                 contentColor = MaterialTheme.colorScheme.primary
                             ),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.padding(end = 8.dp)
+                            modifier = Modifier.padding(end = 4.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.FlashOn,
@@ -288,6 +304,14 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Unlock Pro", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
+                    }
+
+                    IconButton(onClick = { showHelpDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.HelpOutline,
+                            contentDescription = "Help & Guide",
+                            tint = MaterialTheme.colorScheme.onBackground
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
@@ -454,17 +478,37 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val domainHeaderLabel = when {
-                        isPro -> "Blocked Domains (${blockedDomains.size} • Unlimited)"
-                        blockedDomains.size > MainViewModel.FREE_DOMAIN_LIMIT -> "Blocked Domains (${blockedDomains.size}) • Free limit: ${MainViewModel.FREE_DOMAIN_LIMIT}"
-                        else -> "Blocked Domains (${blockedDomains.size}/${MainViewModel.FREE_DOMAIN_LIMIT})"
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Blocked Domains",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isPro) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
+                            border = if (isPro) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null
+                        ) {
+                            val countText = if (isPro) {
+                                "${blockedDomains.size} / ∞"
+                            } else if (blockedDomains.size > MainViewModel.FREE_DOMAIN_LIMIT) {
+                                "${blockedDomains.size} / ${MainViewModel.FREE_DOMAIN_LIMIT} max"
+                            } else {
+                                "${blockedDomains.size} / ${MainViewModel.FREE_DOMAIN_LIMIT}"
+                            }
+                            Text(
+                                text = countText,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isPro) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
                     }
-                    Text(
-                        text = domainHeaderLabel,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
                     if (!isPro) {
                         TextButton(onClick = { showProDialog = true }) {
                             Text("Upgrade", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
@@ -478,13 +522,16 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.Top
                 ) {
                     OutlinedTextField(
                         value = domainInput,
                         onValueChange = { domainInput = it },
                         label = { Text("Add custom domain") },
                         placeholder = { Text("e.g. reddit.com") },
+                        supportingText = {
+                            Text("Domain only (e.g. reddit.com) • URLs are auto-cleaned", fontSize = 11.sp, color = Color.Gray)
+                        },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -507,7 +554,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                                 pendingDomainToAdd = normalized
                             }
                         },
-                        modifier = Modifier.height(56.dp)
+                        modifier = Modifier.padding(top = 8.dp).height(56.dp)
                     ) {
                         Text("Add")
                     }
@@ -575,6 +622,10 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 viewModel.debugTogglePro()
             }
         )
+    }
+
+    if (showHelpDialog) {
+        HelpDialog(onDismiss = { showHelpDialog = false })
     }
 }
 
