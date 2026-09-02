@@ -30,9 +30,14 @@ class DnsVpnService : VpnService() {
 
     companion object {
         private const val TAG = "NullRouteVPN"
-        private const val MIN_CACHE_TTL_MS = 60_000L     // Minimum 60 seconds TTL floor
+        private const val MIN_CACHE_TTL_MS = 300_000L    // Minimum 300 seconds (5 minutes) TTL floor for mobile background traffic
         private const val MAX_CACHE_TTL_MS = 3600_000L   // Maximum 1 hour
+        private const val NEGATIVE_CACHE_TTL_MS = 60_000L // 60s for NODATA / empty answers
+        private const val MAX_CACHE_ENTRIES = 2000       // Memory guardrail
         private const val QUERY_TIMEOUT_MS = 2000L      // 2 seconds before fast-fail
+
+        // Global in-memory DNS cache preserving warm entries across VPN service restarts/toggles
+        private val dnsResponseCache = ConcurrentHashMap<DnsCacheKey, CachedDnsResponse>()
 
         // IPv6 DNS Server representation (fd00:a:b:c::1)
         private val IPV6_DNS_SERVER = byteArrayOf(
@@ -84,7 +89,22 @@ class DnsVpnService : VpnService() {
     @Volatile
     private var cachedBlockedDomains: Set<String> = emptySet()
 
-    private val dnsResponseCache = ConcurrentHashMap<DnsCacheKey, CachedDnsResponse>()
+    private fun putInCache(key: DnsCacheKey, response: CachedDnsResponse) {
+        if (dnsResponseCache.size >= MAX_CACHE_ENTRIES) {
+            val now = System.currentTimeMillis()
+            dnsResponseCache.entries.removeIf { (now - it.value.timestampMs) >= it.value.ttlMs }
+            if (dnsResponseCache.size >= MAX_CACHE_ENTRIES) {
+                val iter = dnsResponseCache.keys().iterator()
+                var count = 0
+                while (iter.hasNext() && count < 200) {
+                    dnsResponseCache.remove(iter.next())
+                    count++
+                }
+            }
+        }
+        dnsResponseCache[key] = response
+    }
+
     private val inFlightQueries = ConcurrentHashMap<Short, InFlightQuery>()
     private val tidSequence = AtomicInteger(1)
 
@@ -103,6 +123,7 @@ class DnsVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        DnsTelemetryTracker.init(applicationContext)
         repository = SharedPreferencesBlocklistRepository(applicationContext)
         reloadBlockedDomainsCache()
         registerNetworkCallback()
@@ -179,8 +200,10 @@ class DnsVpnService : VpnService() {
     private fun startSweeper() {
         sweeperScheduler = Executors.newSingleThreadScheduledExecutor().apply {
             scheduleWithFixedDelay({
-                sweepTimedOutQueries()
-            }, 500, 500, TimeUnit.MILLISECONDS)
+                if (inFlightQueries.isNotEmpty()) {
+                    sweepTimedOutQueries()
+                }
+            }, 1000, 1000, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -399,12 +422,15 @@ class DnsVpnService : VpnService() {
                 val payload = ByteArray(length)
                 System.arraycopy(recvBuffer, 0, payload, 0, length)
 
-                // Parse upstream TTL dynamically (clamped between 60s and 3600s)
+                // Parse upstream TTL dynamically (clamped between 300s and 3600s)
                 val ttlMs = extractDnsTtlMs(payload, length)
-                dnsResponseCache[DnsCacheKey(query.domain.lowercase(Locale.US), query.qType)] = CachedDnsResponse(
-                    timestampMs = System.currentTimeMillis(),
-                    ttlMs = ttlMs,
-                    payload = payload
+                putInCache(
+                    DnsCacheKey(query.domain.lowercase(Locale.US), query.qType),
+                    CachedDnsResponse(
+                        timestampMs = System.currentTimeMillis(),
+                        ttlMs = ttlMs,
+                        payload = payload
+                    )
                 )
 
                 // Rewrite UpstreamTID back to ClientTID
@@ -550,6 +576,9 @@ class DnsVpnService : VpnService() {
                                 System.arraycopy(buffer, dnsOffset + 12, cachedPayload, 12, dnsQuestionLen - 12)
                             }
 
+                            val remainingTtlSec = maxOf(1, ((cached.ttlMs - (now - cached.timestampMs)) / 1000L).toInt())
+                            updateDnsResponseTtl(cachedPayload, remainingTtlSec)
+
                             val ipUdpResponse = buildIpUdpPacket(
                                 srcIp = byteArrayOf(10, 0, 0, 1),
                                 destIp = clientIp,
@@ -684,6 +713,9 @@ class DnsVpnService : VpnService() {
                                 System.arraycopy(buffer, dnsOffset + 12, cachedPayload, 12, dnsQuestionLen - 12)
                             }
 
+                            val remainingTtlSec = maxOf(1, ((cached.ttlMs - (now - cached.timestampMs)) / 1000L).toInt())
+                            updateDnsResponseTtl(cachedPayload, remainingTtlSec)
+
                             val ipV6Response = buildIpV6UdpPacket(
                                 srcIp = IPV6_DNS_SERVER,
                                 destIp = clientIp,
@@ -798,7 +830,7 @@ class DnsVpnService : VpnService() {
         try {
             if (length < 12) return MIN_CACHE_TTL_MS
             val anCount = getShort(payload, 6)
-            if (anCount <= 0) return MIN_CACHE_TTL_MS
+            if (anCount <= 0) return NEGATIVE_CACHE_TTL_MS
 
             // Skip Header (12 bytes) and Question Section
             val (_, endQuestionOffset) = parseDomain(payload, 12)
@@ -823,6 +855,43 @@ class DnsVpnService : VpnService() {
             // Fallback to default minimum TTL
         }
         return MIN_CACHE_TTL_MS
+    }
+
+    private fun updateDnsResponseTtl(payload: ByteArray, remainingTtlSeconds: Int) {
+        try {
+            if (payload.size < 12) return
+            val anCount = getShort(payload, 6)
+            if (anCount <= 0) return
+
+            val (_, endQuestionOffset) = parseDomain(payload, 12)
+            var offset = endQuestionOffset + 4
+
+            for (i in 0 until anCount) {
+                if (offset + 10 > payload.size) break
+
+                // Name (compressed or uncompressed)
+                if ((payload[offset].toInt() and 0xC0) == 0xC0) {
+                    offset += 2
+                } else {
+                    val (_, endNameOffset) = parseDomain(payload, offset)
+                    offset = endNameOffset
+                }
+
+                if (offset + 10 > payload.size) break
+
+                // Type (2) + Class (2) -> TTL starts at offset + 4
+                val ttlOffset = offset + 4
+                payload[ttlOffset] = (remainingTtlSeconds shr 24).toByte()
+                payload[ttlOffset + 1] = (remainingTtlSeconds shr 16).toByte()
+                payload[ttlOffset + 2] = (remainingTtlSeconds shr 8).toByte()
+                payload[ttlOffset + 3] = (remainingTtlSeconds and 0xFF).toByte()
+
+                val dataLen = getShort(payload, offset + 8)
+                offset += 10 + dataLen
+            }
+        } catch (e: Exception) {
+            // Ignore if format deviates
+        }
     }
 
     private fun buildDnsErrorResponse(questionSection: ByteArray, clientTid: Short, rcode: Int): ByteArray {

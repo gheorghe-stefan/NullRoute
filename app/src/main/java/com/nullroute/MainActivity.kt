@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.nullroute.vpn.DnsTelemetryTracker.init(applicationContext)
 
         // Clear bypass protection preference in release/final version to enforce strict locking
         val isDebuggable = (applicationContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -563,7 +564,7 @@ fun DiagnosticsCard(
                             fontSize = 15.sp
                         )
                         Text(
-                            text = "Queries: ${telemetry.totalQueries} | QPS: ${String.format(java.util.Locale.US, "%.1f", telemetry.currentQps)} (Peak: ${String.format(java.util.Locale.US, "%.1f", telemetry.peakQps)})",
+                            text = "Queries: ${telemetry.totalQueries} (All-Time: ${telemetry.allTimeTotalQueries}) | QPS: ${String.format(java.util.Locale.US, "%.1f", telemetry.currentQps)}",
                             fontSize = 12.sp,
                             color = Color.Gray
                         )
@@ -585,14 +586,14 @@ fun DiagnosticsCard(
                 // Stats Grid
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     MetricItem(title = "Cache Hit Rate", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.cacheHitRatioPct)}%")
+                    MetricItem(title = "All-Time Hit Rate", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.allTimeHitRatioPct)}%")
                     MetricItem(title = "Avg Latency", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.avgLatencyMs)} ms")
-                    MetricItem(title = "P95 Latency", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.p95LatencyMs)} ms")
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    MetricItem(title = "Lock Wait (avg)", value = "${String.format(java.util.Locale.US, "%.1f", telemetry.avgLockWaitMs)} ms")
+                    MetricItem(title = "Session Queries", value = "${telemetry.totalQueries}")
+                    MetricItem(title = "All-Time Queries", value = "${telemetry.allTimeTotalQueries}")
                     MetricItem(title = "Timeouts", value = "${telemetry.timeouts}")
-                    MetricItem(title = "Net Errors", value = "${telemetry.networkErrors}")
                 }
 
                 if (telemetry.qTypeCounts.isNotEmpty()) {
