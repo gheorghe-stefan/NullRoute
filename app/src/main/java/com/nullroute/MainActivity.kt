@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Visibility
@@ -137,6 +138,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     var pendingDomainToAdd by remember { mutableStateOf<String?>(null) }
     var showProDialog by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
+    var domainToLockPermanently by remember { mutableStateOf<String?>(null) }
 
     // Listen for billing event messages (purchases, errors, debug toggle)
     LaunchedEffect(Unit) {
@@ -258,6 +260,45 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                     }
                 ) {
                     Text("No (Removable)")
+                }
+            }
+        )
+    }
+
+    if (domainToLockPermanently != null) {
+        val targetDomain = domainToLockPermanently!!
+        AlertDialog(
+            onDismissRequest = { domainToLockPermanently = null },
+            title = { Text("🔒 Lock \"$targetDomain\" Forever?") },
+            text = {
+                Text(
+                    "Are you sure you want to permanently lock this domain?\n\n" +
+                    "Once locked, \"$targetDomain\" can NEVER be deleted from within the app. " +
+                    "This action is permanent and cannot be undone."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val success = viewModel.convertToPermanent(targetDomain)
+                        if (success) {
+                            Toast.makeText(context, "Locked $targetDomain permanently!", Toast.LENGTH_SHORT).show()
+                            if (isVpnActive) {
+                                context.startService(Intent(context, DnsVpnService::class.java))
+                            }
+                        } else {
+                            Toast.makeText(context, "Failed to lock domain", Toast.LENGTH_SHORT).show()
+                        }
+                        domainToLockPermanently = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B))
+                ) {
+                    Text("Lock Forever", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { domainToLockPermanently = null }) {
+                    Text("Cancel")
                 }
             }
         )
@@ -585,7 +626,15 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                                     context.startService(Intent(context, DnsVpnService::class.java))
                                 }
                             }
-                        } else null
+                        } else null,
+                        onConvertToPermanent = {
+                            if (isPro) {
+                                domainToLockPermanently = domainItem.domain
+                            } else {
+                                Toast.makeText(context, "Permanent (Forever) lock requires NullRoute Pro", Toast.LENGTH_SHORT).show()
+                                showProDialog = true
+                            }
+                        }
                     )
                 }
             } else {
@@ -645,9 +694,11 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
 fun DomainItem(
     domain: BlockedDomain,
     isPro: Boolean = true,
-    onRemove: (() -> Unit)? = null
+    onRemove: (() -> Unit)? = null,
+    onConvertToPermanent: (() -> Unit)? = null
 ) {
     var isRevealed by rememberSaveable { mutableStateOf(false) }
+    val isForever = !domain.isRemovable && isPro
 
     Surface(
         modifier = Modifier
@@ -678,7 +729,6 @@ fun DomainItem(
                     )
                 }
                 Spacer(modifier = Modifier.height(2.dp))
-                val isForever = !domain.isRemovable && isPro
                 val badgeText = if (isForever) "Permanent (Forever)" else "Removable"
                 val badgeColor = if (isForever) Color(0xFFF59E0B) else MaterialTheme.colorScheme.primary
                 Text(
@@ -692,6 +742,19 @@ fun DomainItem(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                // If not permanently locked, show button to convert to permanent lock
+                if (!isForever && onConvertToPermanent != null) {
+                    IconButton(
+                        onClick = onConvertToPermanent,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Lock permanently (Forever)",
+                            tint = Color(0xFFF59E0B)
+                        )
+                    }
+                }
                 if (onRemove != null) {
                     IconButton(
                         onClick = onRemove,

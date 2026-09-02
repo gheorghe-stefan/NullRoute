@@ -52,6 +52,14 @@ class MainViewModelTest {
             if (!item.isRemovable && !force) return false
             return domains.remove(item)
         }
+
+        override fun updateDomainRemovable(domain: String, isRemovable: Boolean): Boolean {
+            val normalized = com.nullroute.utils.DomainNormalizer.normalize(domain) ?: return false
+            val index = domains.indexOfFirst { it.domain == normalized }
+            if (index == -1) return false
+            domains[index] = domains[index].copy(isRemovable = isRemovable)
+            return true
+        }
     }
 
     class MockBillingProvider(initialPro: Boolean = false) : BillingProvider {
@@ -211,5 +219,18 @@ class MainViewModelTest {
         mockBillingProvider.setPro(true)
         viewModel.loadData()
         assertEquals(4, viewModel.blockedDomains.value.size)
+    }
+
+    @Test
+    fun testConvertToPermanentRequiresPro() {
+        viewModel.addDomain("site.com", isRemovable = true)
+        // In free tier, convertToPermanent is rejected
+        assertFalse(viewModel.convertToPermanent("site.com"))
+        assertTrue(viewModel.blockedDomains.value[0].isRemovable)
+
+        // In pro tier, convertToPermanent succeeds
+        mockBillingProvider.setPro(true)
+        assertTrue(viewModel.convertToPermanent("site.com"))
+        assertFalse(viewModel.blockedDomains.value[0].isRemovable)
     }
 }

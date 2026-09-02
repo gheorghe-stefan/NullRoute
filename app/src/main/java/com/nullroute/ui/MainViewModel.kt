@@ -122,6 +122,15 @@ class MainViewModel(
         return success
     }
 
+    fun convertToPermanent(domain: String): Boolean {
+        if (!isPro.value) return false
+        val success = repository.updateDomainRemovable(domain, isRemovable = false)
+        if (success) {
+            loadData()
+        }
+        return success
+    }
+
     fun freezeLock(context: Context) {
         val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("permanent_lock", true).apply()
