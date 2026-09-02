@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.lifecycle.lifecycleScope
@@ -279,7 +280,8 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
                                 color = Color(0xFFF59E0B).copy(alpha = 0.2f),
-                                border = BorderStroke(1.dp, Color(0xFFF59E0B))
+                                border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                                modifier = Modifier.clickable { showProDialog = true }
                             ) {
                                 Text(
                                     text = "PRO",
@@ -498,7 +500,8 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = if (isPro) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant,
-                            border = if (isPro) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null
+                            border = if (isPro) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+                            modifier = Modifier.clickable { showProDialog = true }
                         ) {
                             val countText = if (isPro) {
                                 "${blockedDomains.size} / ∞"
