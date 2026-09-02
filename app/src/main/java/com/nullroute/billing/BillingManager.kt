@@ -120,11 +120,17 @@ class BillingManager(
 
         billingClient.queryPurchasesAsync(params) { billingResult, purchases ->
             if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-                for (purchase in purchases) {
-                    if (purchase.products.contains(PRODUCT_ID_PRO) &&
-                        purchase.purchaseState == Purchase.PurchaseState.PURCHASED
-                    ) {
-                        handlePurchase(purchase)
+                val activeProPurchase = purchases.find { purchase ->
+                    purchase.products.contains(PRODUCT_ID_PRO) &&
+                            purchase.purchaseState == Purchase.PurchaseState.PURCHASED
+                }
+                if (activeProPurchase != null) {
+                    handlePurchase(activeProPurchase)
+                } else if (!BuildConfig.DEBUG) {
+                    // If Google Play confirms the user does NOT own Pro, revoke Pro (handles refunds, chargebacks, and account changes)
+                    if (_isPro.value) {
+                        Log.i(TAG, "No active Pro purchase on Google Play account. Reverting to Free tier.")
+                        setProStatus(false)
                     }
                 }
             }
