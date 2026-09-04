@@ -139,6 +139,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     var showProDialog by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
     var domainToLockPermanently by remember { mutableStateOf<String?>(null) }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
 
     // Listen for billing event messages (purchases, errors, debug toggle)
     LaunchedEffect(Unit) {
@@ -298,6 +299,60 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
             },
             dismissButton = {
                 TextButton(onClick = { domainToLockPermanently = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showAccessibilityDisclosure) {
+        AlertDialog(
+            onDismissRequest = { showAccessibilityDisclosure = false },
+            title = {
+                Text(
+                    text = "🛡️ Accessibility Permission Required",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "NullRoute uses Android's AccessibilityService API solely for Uninstall & Tamper Protection.",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        text = "• Purpose: To prevent impulsive self-sabotage, this service detects when you navigate to Android Settings to disable the blocker or uninstall the app during active focus sessions, redirecting you back to your screen.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                    )
+                    Text(
+                        text = "• Privacy & Security: NullRoute does NOT monitor, collect, or store personal screen content. It does NOT read personal messages, track keystrokes, or access passwords. Zero accessibility data is ever transmitted off your device.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                    )
+                    Text(
+                        text = "• Control: You can toggle this service off anytime in Android Accessibility Settings when focus mode is not required.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAccessibilityDisclosure = false
+                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Text("Agree & Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAccessibilityDisclosure = false }) {
                     Text("Cancel")
                 }
             }
@@ -471,8 +526,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         }
                         Button(
                             onClick = {
-                                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                context.startActivity(intent)
+                                showAccessibilityDisclosure = true
                             },
                             enabled = !isAccessibilityActive
                         ) {
