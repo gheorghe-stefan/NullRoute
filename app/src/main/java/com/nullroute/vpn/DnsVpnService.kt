@@ -156,6 +156,8 @@ class DnsVpnService : VpnService() {
         cleanup()
         vpnLoopThread?.interrupt()
         vpnLoopThread = null
+        receiverThread?.interrupt()
+        receiverThread = null
         super.onDestroy()
     }
 
@@ -177,8 +179,8 @@ class DnsVpnService : VpnService() {
             connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    Log.i(TAG, "Network switched/available: recreating protected upstream socket")
-                    rebuildForwardingSocket()
+                    Log.i(TAG, "Network switched/available: recreating protected upstream socket for $network")
+                    rebuildForwardingSocket(network)
                 }
 
                 override fun onLost(network: Network) {
@@ -217,6 +219,7 @@ class DnsVpnService : VpnService() {
     }
 
     private fun sweepTimedOutQueries() {
+        ensureReceiverThreadRunning()
         val now = System.currentTimeMillis()
         val expiredEntries = mutableListOf<Pair<Short, InFlightQuery>>()
 
@@ -268,45 +271,69 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun ensureReceiverThreadRunning() {
+        if (!VpnStateTracker.isRunning.value) return
+        if (receiverThread == null || !receiverThread!!.isAlive) {
+            synchronized(this) {
+                if (receiverThread == null || !receiverThread!!.isAlive) {
+                    receiverThread = Thread({ runUpstreamReceiverLoop() }, "NullRouteUpstreamReceiver").apply {
+                        isDaemon = true
+                        start()
+                    }
+                    Log.i(TAG, "NullRouteUpstreamReceiver thread started")
+                }
+            }
+        }
+    }
+
     @Synchronized
-    private fun rebuildForwardingSocket() {
+    private fun rebuildForwardingSocket(network: Network? = null) {
         try {
-            forwardingSocket?.close()
+            val oldSocket = forwardingSocket
+            forwardingSocket = null
+            oldSocket?.close()
         } catch (e: Exception) {
             // Ignore
         }
-        forwardingSocket = null
-        getOrCreateForwardingSocket()
+        createProtectedSocket(network)
     }
 
     private fun getOrCreateForwardingSocket(): DatagramSocket? {
         val s1 = forwardingSocket
         if (s1 != null && !s1.isClosed) {
+            ensureReceiverThreadRunning()
             return s1
         }
         return synchronized(this) {
             val s2 = forwardingSocket
             if (s2 != null && !s2.isClosed) {
+                ensureReceiverThreadRunning()
                 s2
             } else {
+                createProtectedSocket()
+            }
+        }
+    }
+
+    @Synchronized
+    private fun createProtectedSocket(network: Network? = null): DatagramSocket? {
+        return try {
+            val newSocket = DatagramSocket()
+            protect(newSocket)
+            if (network != null) {
                 try {
-                    val newSocket = DatagramSocket() // Non-blocking dedicated read loop
-                    protect(newSocket)
-                    forwardingSocket = newSocket
-
-                    // Start dedicated asynchronous receiver thread if not running
-                    if (receiverThread == null || !receiverThread!!.isAlive) {
-                        receiverThread = Thread({ runUpstreamReceiverLoop(newSocket) }, "NullRouteUpstreamReceiver").apply {
-                            start()
-                        }
-                    }
-
-                    newSocket
+                    network.bindSocket(newSocket)
+                    Log.i(TAG, "Successfully bound upstream socket to network: $network")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error creating protected DatagramSocket", e)
-                    null
+                    Log.w(TAG, "Failed to bind socket to network $network", e)
                 }
             }
+            forwardingSocket = newSocket
+            ensureReceiverThreadRunning()
+            newSocket
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating protected DatagramSocket", e)
+            null
         }
     }
 
@@ -379,8 +406,28 @@ class DnsVpnService : VpnService() {
             val buffer = ByteArray(16384)
             Log.i(TAG, "VPN Interface established, starting packet read loop")
 
-            while (!Thread.currentThread().isInterrupted) {
-                val length = inputStream.read(buffer)
+            var consecutiveReadErrors = 0
+            while (!Thread.currentThread().isInterrupted && VpnStateTracker.isRunning.value) {
+                val length = try {
+                    val len = inputStream.read(buffer)
+                    consecutiveReadErrors = 0
+                    len
+                } catch (e: IOException) {
+                    if (Thread.currentThread().isInterrupted || !VpnStateTracker.isRunning.value) break
+                    consecutiveReadErrors++
+                    Log.w(TAG, "VPN read error ($consecutiveReadErrors): ${e.message}")
+                    if (consecutiveReadErrors > 5) {
+                        Log.e(TAG, "Too many consecutive VPN read errors, aborting loop")
+                        break
+                    }
+                    try {
+                        Thread.sleep(100)
+                    } catch (ie: InterruptedException) {
+                        break
+                    }
+                    continue
+                }
+
                 if (length < 0) {
                     Log.i(TAG, "EOF from VPN interface")
                     break
@@ -405,11 +452,21 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun runUpstreamReceiverLoop(socket: DatagramSocket) {
+    private fun runUpstreamReceiverLoop() {
         val recvBuffer = ByteArray(2048)
         Log.i(TAG, "Dedicated Async Upstream Receiver started")
 
-        while (!Thread.currentThread().isInterrupted && !socket.isClosed) {
+        while (!Thread.currentThread().isInterrupted && VpnStateTracker.isRunning.value) {
+            val socket = forwardingSocket
+            if (socket == null || socket.isClosed) {
+                try {
+                    Thread.sleep(50)
+                } catch (e: InterruptedException) {
+                    break
+                }
+                continue
+            }
+
             try {
                 val packet = DatagramPacket(recvBuffer, recvBuffer.size)
                 socket.receive(packet) // Blocks on dedicated daemon thread (0 lock contention!)
@@ -466,8 +523,13 @@ class DnsVpnService : VpnService() {
                     out.write(responsePacket)
                 }
             } catch (e: Exception) {
-                if (socket.isClosed || Thread.currentThread().isInterrupted) break
-                Log.w(TAG, "Upstream receiver read error", e)
+                if (Thread.currentThread().isInterrupted || !VpnStateTracker.isRunning.value) break
+                // If socket closed or network switched, sleep briefly to avoid 100% CPU busy-spin
+                try {
+                    Thread.sleep(100)
+                } catch (ie: InterruptedException) {
+                    break
+                }
             }
         }
         Log.i(TAG, "Upstream receiver stopped")
@@ -531,7 +593,7 @@ class DnsVpnService : VpnService() {
 
             val qCount = getShort(buffer, dnsOffset + 4)
             if (qCount > 0) {
-                val (domain, endOffset) = parseDomain(buffer, dnsOffset + 12)
+                val (domain, endOffset) = parseDomain(buffer, dnsOffset + 12, dnsOffset + dnsLen)
                 if (domain.isNotEmpty()) {
                     val qType = if (endOffset + 2 <= length) getShort(buffer, endOffset) else 1
                     val clientTid = getShort(buffer, dnsOffset).toShort()
@@ -668,7 +730,7 @@ class DnsVpnService : VpnService() {
 
             val qCount = getShort(buffer, dnsOffset + 4)
             if (qCount > 0) {
-                val (domain, endOffset) = parseDomain(buffer, dnsOffset + 12)
+                val (domain, endOffset) = parseDomain(buffer, dnsOffset + 12, dnsOffset + dnsLen)
                 if (domain.isNotEmpty()) {
                     val qType = if (endOffset + 2 <= length) getShort(buffer, endOffset) else 1
                     val clientTid = getShort(buffer, dnsOffset).toShort()
@@ -837,7 +899,7 @@ class DnsVpnService : VpnService() {
             if (anCount <= 0) return NEGATIVE_CACHE_TTL_MS
 
             // Skip Header (12 bytes) and Question Section
-            val (_, endQuestionOffset) = parseDomain(payload, 12)
+            val (_, endQuestionOffset) = parseDomain(payload, 12, length)
             var offset = endQuestionOffset + 4 // QTYPE (2) + QCLASS (2)
 
             if (offset + 10 <= length) {
@@ -845,7 +907,7 @@ class DnsVpnService : VpnService() {
                 if ((payload[offset].toInt() and 0xC0) == 0xC0) {
                     offset += 2 // Pointer is 2 bytes
                 } else {
-                    val (_, endNameOffset) = parseDomain(payload, offset)
+                    val (_, endNameOffset) = parseDomain(payload, offset, length)
                     offset = endNameOffset
                 }
 
@@ -867,7 +929,7 @@ class DnsVpnService : VpnService() {
             val anCount = getShort(payload, 6)
             if (anCount <= 0) return
 
-            val (_, endQuestionOffset) = parseDomain(payload, 12)
+            val (_, endQuestionOffset) = parseDomain(payload, 12, payload.size)
             var offset = endQuestionOffset + 4
 
             for (i in 0 until anCount) {
@@ -877,7 +939,7 @@ class DnsVpnService : VpnService() {
                 if ((payload[offset].toInt() and 0xC0) == 0xC0) {
                     offset += 2
                 } else {
-                    val (_, endNameOffset) = parseDomain(payload, offset)
+                    val (_, endNameOffset) = parseDomain(payload, offset, payload.size)
                     offset = endNameOffset
                 }
 
@@ -933,10 +995,11 @@ class DnsVpnService : VpnService() {
                 (data[offset + 3].toInt() and 0xFF)
     }
 
-    private fun parseDomain(data: ByteArray, offset: Int): Pair<String, Int> {
+    private fun parseDomain(data: ByteArray, offset: Int, limit: Int = data.size): Pair<String, Int> {
         var currentOffset = offset
+        val safeLimit = minOf(limit, data.size)
         val sb = StringBuilder()
-        while (currentOffset < data.size) {
+        while (currentOffset < safeLimit) {
             val length = data[currentOffset].toInt() and 0xFF
             if (length == 0) {
                 currentOffset++
@@ -949,7 +1012,7 @@ class DnsVpnService : VpnService() {
             if (sb.isNotEmpty()) {
                 sb.append(".")
             }
-            if (currentOffset + 1 + length > data.size) {
+            if (currentOffset + 1 + length > safeLimit) {
                 break
             }
             sb.append(String(data, currentOffset + 1, length, Charsets.US_ASCII))
@@ -987,6 +1050,7 @@ class DnsVpnService : VpnService() {
         buf[10] = (ipChecksum.toInt() shr 8).toByte()
         buf[11] = (ipChecksum.toInt() and 0xFF).toByte()
 
+        // UDP Header
         buf[20] = (srcPort shr 8).toByte()
         buf[21] = (srcPort and 0xFF).toByte()
         buf[22] = (destPort shr 8).toByte()
@@ -995,8 +1059,9 @@ class DnsVpnService : VpnService() {
         val udpLen = 8 + payloadLen
         buf[24] = (udpLen shr 8).toByte()
         buf[25] = (udpLen and 0xFF).toByte()
-        buf[26] = 0x00.toByte()
-        buf[27] = 0x00.toByte()
+
+        buf[26] = 0.toByte()
+        buf[27] = 0.toByte()
 
         System.arraycopy(payload, 0, buf, 28, payloadLen)
         return buf
@@ -1031,8 +1096,16 @@ class DnsVpnService : VpnService() {
 
         buf[44] = (udpLen shr 8).toByte()
         buf[45] = (udpLen and 0xFF).toByte()
+        buf[46] = 0.toByte()
+        buf[47] = 0.toByte()
 
         System.arraycopy(payload, 0, buf, 48, payloadLen)
+
+        // Mandatory IPv6 UDP Checksum (RFC 8200)
+        val checksum = calculateIPv6UpperLayerChecksum(buf, totalLen, 17)
+        buf[46] = (checksum.toInt() shr 8).toByte()
+        buf[47] = (checksum.toInt() and 0xFF).toByte()
+
         return buf
     }
 
@@ -1076,6 +1149,10 @@ class DnsVpnService : VpnService() {
         // Flags: RST (0x04) | ACK (0x10) = 0x14
         buf[33] = 0x14.toByte()
 
+        val tcpChecksum = calculateTcpChecksum(srcIp, destIp, buf, 20, 20)
+        buf[36] = (tcpChecksum.toInt() shr 8).toByte()
+        buf[37] = (tcpChecksum.toInt() and 0xFF).toByte()
+
         return buf
     }
 
@@ -1113,7 +1190,80 @@ class DnsVpnService : VpnService() {
         buf[52] = 0x50.toByte()
         buf[53] = 0x14.toByte() // RST | ACK
 
+        buf[56] = 0.toByte()
+        buf[57] = 0.toByte()
+
+        val tcpChecksum = calculateIPv6UpperLayerChecksum(buf, totalLen, 6)
+        buf[56] = (tcpChecksum.toInt() shr 8).toByte()
+        buf[57] = (tcpChecksum.toInt() and 0xFF).toByte()
+
         return buf
+    }
+
+    private fun calculateTcpChecksum(srcIp: ByteArray, destIp: ByteArray, tcpBuf: ByteArray, tcpOffset: Int, tcpLen: Int): Short {
+        var sum = 0L
+        sum += ((srcIp[0].toInt() and 0xFF) shl 8) or (srcIp[1].toInt() and 0xFF)
+        sum += ((srcIp[2].toInt() and 0xFF) shl 8) or (srcIp[3].toInt() and 0xFF)
+        sum += ((destIp[0].toInt() and 0xFF) shl 8) or (destIp[1].toInt() and 0xFF)
+        sum += ((destIp[2].toInt() and 0xFF) shl 8) or (destIp[3].toInt() and 0xFF)
+        sum += 6 + tcpLen
+
+        var i = tcpOffset
+        val end = tcpOffset + tcpLen
+        while (i < end - 1) {
+            sum += ((tcpBuf[i].toInt() and 0xFF) shl 8) or (tcpBuf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < end) {
+            sum += (tcpBuf[i].toInt() and 0xFF) shl 8
+        }
+        while ((sum shr 16) != 0L) {
+            sum = (sum and 0xFFFFL) + (sum shr 16)
+        }
+        val result = (sum.toInt().inv() and 0xFFFF)
+        return result.toShort()
+    }
+
+    private fun calculateIPv6UpperLayerChecksum(buf: ByteArray, totalLen: Int, nextHeader: Int): Short {
+        var sum = 0L
+
+        // 1. Source IPv6 (bytes 8..23)
+        var i = 8
+        while (i < 24) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+
+        // 2. Destination IPv6 (bytes 24..39)
+        i = 24
+        while (i < 40) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+
+        // 3. Upper Layer Length (32-bit integer in pseudo-header)
+        val upperLen = totalLen - 40
+        sum += upperLen
+
+        // 4. Next Header (32-bit in pseudo-header)
+        sum += nextHeader
+
+        // 5. Upper Header + Payload (bytes 40 until totalLen)
+        i = 40
+        while (i < totalLen - 1) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < totalLen) {
+            sum += (buf[i].toInt() and 0xFF) shl 8
+        }
+
+        while ((sum shr 16) != 0L) {
+            sum = (sum and 0xFFFFL) + (sum shr 16)
+        }
+
+        val result = (sum.toInt().inv() and 0xFFFF)
+        return (if (result == 0) 0xFFFF else result).toShort()
     }
 
     private fun calculateChecksum(buf: ByteArray, length: Int): Short {
