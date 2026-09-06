@@ -41,6 +41,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Share
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nullroute.billing.BillingManager
@@ -51,6 +52,7 @@ import com.nullroute.ui.MainViewModel
 import com.nullroute.ui.MainViewModelFactory
 import com.nullroute.ui.ProUpgradeDialog
 import com.nullroute.utils.DomainNormalizer
+import com.nullroute.utils.SupportLogExporter
 import com.nullroute.vpn.DnsVpnService
 
 class MainActivity : ComponentActivity() {
@@ -536,20 +538,6 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
-            // Live Telemetry & Diagnostics Card
-            item {
-                DiagnosticsCard(
-                    telemetry = telemetry,
-                    onCopyReport = {
-                        val report = viewModel.getExportTelemetryReport()
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("NullRoute Telemetry Report", report)
-                        clipboard.setPrimaryClip(clip)
-                        Toast.makeText(context, "Telemetry report copied to clipboard!", Toast.LENGTH_SHORT).show()
-                    }
-                )
-            }
-
             // 1-Click Distraction Presets
             item {
                 PresetPacksCard(
@@ -702,6 +690,24 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 }
             }
 
+            // Live Telemetry & Diagnostics Card (Moved below blocked URLs)
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                DiagnosticsCard(
+                    telemetry = telemetry,
+                    onShareLogs = {
+                        SupportLogExporter.shareDiagnosticsZip(context)
+                    },
+                    onCopyReport = {
+                        val report = viewModel.getExportTelemetryReport()
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("NullRoute Telemetry Report", report)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(context, "Telemetry report copied to clipboard!", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
             // Footer Version info
             item {
                 Spacer(modifier = Modifier.height(16.dp))
@@ -848,6 +854,7 @@ fun getAppVersion(context: Context): String {
 @Composable
 fun DiagnosticsCard(
     telemetry: com.nullroute.vpn.TelemetrySnapshot,
+    onShareLogs: () -> Unit,
     onCopyReport: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -929,15 +936,29 @@ fun DiagnosticsCard(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Primary Button: Export ZIP for Support
                 Button(
-                    onClick = onCopyReport,
+                    onClick = onShareLogs,
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Export Logs for Support (ZIP)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Secondary Button: Copy Plain Text Report
+                OutlinedButton(
+                    onClick = onCopyReport,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Copy Diagnostic Report", fontSize = 13.sp)
+                    Text("Copy Diagnostic Text Report", fontSize = 13.sp)
                 }
             }
         }

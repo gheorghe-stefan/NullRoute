@@ -8,9 +8,27 @@ import com.nullroute.MainActivity
 
 class BlockerAccessibilityService : AccessibilityService() {
 
+    private var serviceConnectedTime = 0L
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        serviceConnectedTime = System.currentTimeMillis()
+
+        // Smooth UX: Bring NullRoute back to front automatically when user grants permission
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        startActivity(intent)
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val isDebuggable = (applicationContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (isDebuggable) {
+            return
+        }
+
+        // Grace period: ignore events within the first 3 seconds of connection so the setup flow isn't treated as tampering
+        if (System.currentTimeMillis() - serviceConnectedTime < 3000L) {
             return
         }
 
@@ -25,12 +43,9 @@ class BlockerAccessibilityService : AccessibilityService() {
                     // 1. Pop the forbidden App Info / Uninstall page off the Settings backstack
                     performGlobalAction(GLOBAL_ACTION_BACK)
 
-                    // 2. Redirect back to Home screen to prevent disabling or uninstalling
-                    performGlobalAction(GLOBAL_ACTION_HOME)
-
-                    // 3. Launch Main Screen displaying warning message
+                    // 2. Launch Main Screen displaying warning message directly
                     val intent = Intent(this, MainActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                         putExtra("BLOCKED_ATTEMPT", true)
                     }
                     startActivity(intent)

@@ -52,7 +52,7 @@ android {
         applicationId = "com.nullroute"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
+        versionCode = currentBuildNumber
         versionName = "1.0.0"
 
         vectorDrawables {
