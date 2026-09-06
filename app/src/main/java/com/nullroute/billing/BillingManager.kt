@@ -155,8 +155,11 @@ class BillingManager(
                 emitMessage("Purchase cancelled.")
             }
             BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> {
+                val wasAlreadyPro = _isPro.value
                 setProStatus(true)
-                emitMessage("NullRoute Pro is already owned! Unlocked.")
+                if (!wasAlreadyPro) {
+                    emitMessage("NullRoute Pro is already owned! Unlocked.")
+                }
             }
             else -> {
                 emitMessage("Purchase failed: ${billingResult.debugMessage}")
@@ -166,8 +169,11 @@ class BillingManager(
 
     private fun handlePurchase(purchase: Purchase) {
         if (purchase.purchaseState == Purchase.PurchaseState.PURCHASED) {
+            val wasAlreadyPro = _isPro.value
             setProStatus(true)
-            emitMessage("🎉 Thank you! NullRoute Pro is now unlocked.")
+            if (!wasAlreadyPro) {
+                emitMessage("🎉 Thank you! NullRoute Pro is now unlocked.")
+            }
 
             // Acknowledge the purchase if not already acknowledged
             if (!purchase.isAcknowledged) {

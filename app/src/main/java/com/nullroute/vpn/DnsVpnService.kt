@@ -163,8 +163,8 @@ class DnsVpnService : VpnService() {
 
     private fun reloadBlockedDomainsCache() {
         try {
-            val isPro = getSharedPreferences("nullroute_billing_prefs", Context.MODE_PRIVATE)
-                .getBoolean("pro_unlocked", false)
+            val isPro = getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
+                .getBoolean("is_pro_unlocked", false)
             val allDomains = repository.getBlockedDomains()
             val activeDomains = if (isPro) allDomains else allDomains.take(2)
             cachedBlockedDomains = activeDomains.map { it.domain }.toSet()
