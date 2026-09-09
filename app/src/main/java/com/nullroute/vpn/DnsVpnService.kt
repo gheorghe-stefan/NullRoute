@@ -56,6 +56,13 @@ class DnsVpnService : VpnService() {
         private val TERTIARY_UPSTREAM_V4 = InetAddress.getByName("9.9.9.9")
     }
 
+    @Volatile
+    private var upstreamServers: List<InetAddress> = listOf(
+        SECONDARY_UPSTREAM_V4, // Cloudflare 1.1.1.1 (Lowest global latency)
+        PRIMARY_UPSTREAM_V4,   // Google 8.8.8.8
+        TERTIARY_UPSTREAM_V4   // Quad9 9.9.9.9
+    )
+
     data class DnsCacheKey(
         val domain: String,
         val qType: Int
@@ -108,7 +115,7 @@ class DnsVpnService : VpnService() {
     private val inFlightQueries = ConcurrentHashMap<Short, InFlightQuery>()
     private val tidSequence = AtomicInteger(1)
 
-    private val forwardExecutor = Executors.newFixedThreadPool(4)
+    private val forwardExecutor = Executors.newCachedThreadPool()
     private var sweeperScheduler: ScheduledExecutorService? = null
 
     private lateinit var repository: BlocklistRepository
@@ -174,21 +181,54 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun updateDynamicUpstreamDns(network: Network?) {
+        try {
+            val cm = connectivityManager ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val targetNetwork = network ?: cm?.activeNetwork
+            val lp = if (targetNetwork != null) cm?.getLinkProperties(targetNetwork) else null
+            val dnsList = lp?.dnsServers ?: emptyList()
+
+            val validUpstreams = mutableListOf<InetAddress>()
+            // 1. Add Network's native DNS servers first (e.g. Wi-Fi router / Carrier DNS for lowest latency and local names)
+            for (dns in dnsList) {
+                if (dns is java.net.Inet4Address && !validUpstreams.contains(dns)) {
+                    validUpstreams.add(dns)
+                }
+            }
+            // 2. Add ultra-fast reliable public fallbacks
+            if (!validUpstreams.contains(SECONDARY_UPSTREAM_V4)) validUpstreams.add(SECONDARY_UPSTREAM_V4) // Cloudflare 1.1.1.1
+            if (!validUpstreams.contains(PRIMARY_UPSTREAM_V4)) validUpstreams.add(PRIMARY_UPSTREAM_V4)     // Google 8.8.8.8
+            if (!validUpstreams.contains(TERTIARY_UPSTREAM_V4)) validUpstreams.add(TERTIARY_UPSTREAM_V4)   // Quad9 9.9.9.9
+
+            upstreamServers = validUpstreams
+            Log.i(TAG, "Updated dynamic upstream DNS servers: ${upstreamServers.joinToString { it.hostAddress ?: "" }}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update dynamic upstream DNS", e)
+        }
+    }
+
     private fun registerNetworkCallback() {
         try {
             connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.i(TAG, "Network switched/available: recreating protected upstream socket for $network")
+                    updateDynamicUpstreamDns(network)
                     rebuildForwardingSocket(network)
+                }
+
+                override fun onLinkPropertiesChanged(network: Network, linkProperties: android.net.LinkProperties) {
+                    updateDynamicUpstreamDns(network)
                 }
 
                 override fun onLost(network: Network) {
                     Log.i(TAG, "Network lost: resetting upstream socket")
+                    updateDynamicUpstreamDns(null)
                     rebuildForwardingSocket()
                 }
             }
             connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
+            updateDynamicUpstreamDns(connectivityManager?.activeNetwork)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register NetworkCallback", e)
         }
@@ -319,6 +359,12 @@ class DnsVpnService : VpnService() {
     private fun createProtectedSocket(network: Network? = null): DatagramSocket? {
         return try {
             val newSocket = DatagramSocket()
+            try {
+                newSocket.sendBufferSize = 256 * 1024
+                newSocket.receiveBufferSize = 256 * 1024
+            } catch (e: Exception) {
+                // Ignore buffer size warning on restricted devices
+            }
             protect(newSocket)
             if (network != null) {
                 try {
@@ -485,14 +531,16 @@ class DnsVpnService : VpnService() {
 
                 // Parse upstream TTL dynamically (clamped between 300s and 3600s)
                 val ttlMs = extractDnsTtlMs(payload, length)
-                putInCache(
-                    DnsCacheKey(query.domain.lowercase(Locale.US), query.qType),
-                    CachedDnsResponse(
-                        timestampMs = System.currentTimeMillis(),
-                        ttlMs = ttlMs,
-                        payload = payload
+                if (ttlMs > 0) {
+                    putInCache(
+                        DnsCacheKey(query.domain.lowercase(Locale.US), query.qType),
+                        CachedDnsResponse(
+                            timestampMs = System.currentTimeMillis(),
+                            ttlMs = ttlMs,
+                            payload = payload
+                        )
                     )
-                )
+                }
 
                 // Rewrite UpstreamTID back to ClientTID
                 payload[0] = (query.clientTid.toInt() shr 8).toByte()
@@ -844,33 +892,41 @@ class DnsVpnService : VpnService() {
             dnsQuery[0] = (upstreamTid.toInt() shr 8).toByte()
             dnsQuery[1] = (upstreamTid.toInt() and 0xFF).toByte()
 
+            val upstreams = upstreamServers
             var sendSuccess = false
 
-            // Parallel Dual-Upstream Race: Send to Google (8.8.8.8) and Cloudflare (1.1.1.1) simultaneously
+            // Race primary dynamic upstream (local Wi-Fi / carrier DNS or 1.1.1.1) and secondary in parallel
+            val primary = upstreams.firstOrNull() ?: SECONDARY_UPSTREAM_V4
             try {
-                val p1 = DatagramPacket(dnsQuery, dnsLen, PRIMARY_UPSTREAM_V4, 53)
+                val p1 = DatagramPacket(dnsQuery, dnsLen, primary, 53)
                 socket.send(p1)
                 sendSuccess = true
             } catch (e: IOException) {
                 // Secondary will attempt
             }
 
-            try {
-                val p2 = DatagramPacket(dnsQuery, dnsLen, SECONDARY_UPSTREAM_V4, 53)
-                socket.send(p2)
-                sendSuccess = true
-            } catch (e: IOException) {
-                // Ignore
+            val secondary = if (upstreams.size > 1) upstreams[1] else PRIMARY_UPSTREAM_V4
+            if (secondary != primary) {
+                try {
+                    val p2 = DatagramPacket(dnsQuery, dnsLen, secondary, 53)
+                    socket.send(p2)
+                    sendSuccess = true
+                } catch (e: IOException) {
+                    // Ignore
+                }
             }
 
             if (!sendSuccess) {
-                // Fallback to tertiary upstream
-                try {
-                    val p3 = DatagramPacket(dnsQuery, dnsLen, TERTIARY_UPSTREAM_V4, 53)
-                    socket.send(p3)
-                    sendSuccess = true
-                } catch (e: IOException) {
-                    // All upstreams failed
+                // Fallback to remaining upstreams if top two failed
+                for (i in 2 until upstreams.size) {
+                    try {
+                        val fallback = DatagramPacket(dnsQuery, dnsLen, upstreams[i], 53)
+                        socket.send(fallback)
+                        sendSuccess = true
+                        break
+                    } catch (e: IOException) {
+                        // Continue
+                    }
                 }
             }
 
@@ -894,9 +950,20 @@ class DnsVpnService : VpnService() {
 
     private fun extractDnsTtlMs(payload: ByteArray, length: Int): Long {
         try {
-            if (length < 12) return MIN_CACHE_TTL_MS
+            if (length < 12) return -1L
+
+            val rcode = payload[3].toInt() and 0x0F
+            if (rcode != 0 && rcode != 3) {
+                // SERVFAIL (2), REFUSED (5), FORMERR (1), etc. -> NEVER CACHE ERRORS!
+                return -1L
+            }
+            if (rcode == 3) {
+                // NXDOMAIN -> cache for short negative TTL (15s) to avoid pinning transient names
+                return 15_000L
+            }
+
             val anCount = getShort(payload, 6)
-            if (anCount <= 0) return NEGATIVE_CACHE_TTL_MS
+            if (anCount <= 0) return 15_000L // NODATA -> 15s
 
             // Skip Header (12 bytes) and Question Section
             val (_, endQuestionOffset) = parseDomain(payload, 12, length)
@@ -918,7 +985,7 @@ class DnsVpnService : VpnService() {
                 }
             }
         } catch (e: Exception) {
-            // Fallback to default minimum TTL
+            // Fallback
         }
         return MIN_CACHE_TTL_MS
     }

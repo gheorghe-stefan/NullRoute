@@ -209,13 +209,18 @@ object DnsTelemetryTracker {
         periodicScheduler = Executors.newSingleThreadScheduledExecutor().apply {
             scheduleWithFixedDelay({
                 try {
-                    updateSnapshot()
-                    logSummaryToLogcat()
-                    persistAllTimeStats()
+                    val currentQueries = totalQueries.get()
+                    val currentTimeouts = timeouts.get()
+                    // Only update snapshot and write to disk if activity occurred
+                    if (currentQueries != lastLoggedQueries || currentTimeouts != lastLoggedTimeouts) {
+                        updateSnapshot()
+                        logSummaryToLogcat()
+                        persistAllTimeStats()
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in periodic telemetry logging", e)
                 }
-            }, 60, 60, TimeUnit.SECONDS)
+            }, 120, 120, TimeUnit.SECONDS)
         }
     }
 
