@@ -161,6 +161,7 @@ class DnsVpnService : VpnService() {
         unregisterNetworkCallback()
         stopSweeper()
         cleanup()
+        DnsTelemetryTracker.persistToDisk()
         vpnLoopThread?.interrupt()
         vpnLoopThread = null
         receiverThread?.interrupt()
@@ -243,19 +244,53 @@ class DnsVpnService : VpnService() {
         networkCallback = null
     }
 
-    private fun startSweeper() {
-        sweeperScheduler = Executors.newSingleThreadScheduledExecutor().apply {
-            scheduleWithFixedDelay({
-                if (inFlightQueries.isNotEmpty()) {
-                    sweepTimedOutQueries()
+    @Volatile
+    private var isSweeperScheduled = false
+
+    private fun checkAndTriggerSweeper() {
+        if (!isSweeperScheduled && inFlightQueries.isNotEmpty()) {
+            synchronized(this) {
+                if (!isSweeperScheduled && inFlightQueries.isNotEmpty()) {
+                    isSweeperScheduled = true
+                    try {
+                        sweeperScheduler?.schedule({
+                            runDemandSweeper()
+                        }, QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    } catch (e: Exception) {
+                        isSweeperScheduled = false
+                    }
                 }
-            }, 1000, 1000, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
+    private fun runDemandSweeper() {
+        try {
+            sweepTimedOutQueries()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error in demand sweeper", e)
+        } finally {
+            synchronized(this) {
+                isSweeperScheduled = false
+                if (inFlightQueries.isNotEmpty() && VpnStateTracker.isRunning.value) {
+                    checkAndTriggerSweeper()
+                }
+            }
+        }
+    }
+
+    private fun startSweeper() {
+        if (sweeperScheduler == null || sweeperScheduler!!.isShutdown) {
+            sweeperScheduler = Executors.newSingleThreadScheduledExecutor()
         }
     }
 
     private fun stopSweeper() {
-        sweeperScheduler?.shutdownNow()
-        sweeperScheduler = null
+        synchronized(this) {
+            isSweeperScheduled = false
+            sweeperScheduler?.shutdownNow()
+            sweeperScheduler = null
+        }
     }
 
     private fun sweepTimedOutQueries() {
@@ -942,6 +977,7 @@ class DnsVpnService : VpnService() {
         for (attempt in 0..200) {
             val candidate = (tidSequence.incrementAndGet() and 0x7FFF).toShort()
             if (inFlightQueries.putIfAbsent(candidate, query) == null) {
+                checkAndTriggerSweeper()
                 return candidate
             }
         }

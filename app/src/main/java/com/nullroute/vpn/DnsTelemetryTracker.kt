@@ -89,13 +89,8 @@ object DnsTelemetryTracker {
     private val _snapshot = MutableStateFlow(TelemetrySnapshot())
     val snapshot: StateFlow<TelemetrySnapshot> = _snapshot.asStateFlow()
 
-    private var periodicScheduler: ScheduledExecutorService? = null
     private var lastLoggedQueries: Long = -1
     private var lastLoggedTimeouts: Long = -1
-
-    init {
-        startPeriodicLogger()
-    }
 
     @Synchronized
     fun init(context: Context) {
@@ -204,23 +199,19 @@ object DnsTelemetryTracker {
     }
 
     @Synchronized
-    fun startPeriodicLogger() {
-        if (periodicScheduler != null && !periodicScheduler!!.isShutdown) return
-        periodicScheduler = Executors.newSingleThreadScheduledExecutor().apply {
-            scheduleWithFixedDelay({
-                try {
-                    val currentQueries = totalQueries.get()
-                    val currentTimeouts = timeouts.get()
-                    // Only update snapshot and write to disk if activity occurred
-                    if (currentQueries != lastLoggedQueries || currentTimeouts != lastLoggedTimeouts) {
-                        updateSnapshot()
-                        logSummaryToLogcat()
-                        persistAllTimeStats()
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error in periodic telemetry logging", e)
-                }
-            }, 120, 120, TimeUnit.SECONDS)
+    fun persistToDisk() {
+        try {
+            val currentQueries = totalQueries.get()
+            val currentTimeouts = timeouts.get()
+            if (currentQueries != lastLoggedQueries || currentTimeouts != lastLoggedTimeouts) {
+                updateSnapshot()
+                logSummaryToLogcat()
+                persistAllTimeStats()
+            }
+        } catch (e: Exception) {
+            try {
+                Log.e(TAG, "Error in on-demand telemetry persistence", e)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -401,7 +392,9 @@ object DnsTelemetryTracker {
             append("===============================================================")
         }.toString()
 
-        Log.i(TAG, summary)
+        try {
+            Log.i(TAG, summary)
+        } catch (_: Throwable) {}
         appendToLogFile(summary)
     }
 
@@ -417,7 +410,7 @@ object DnsTelemetryTracker {
     }
 
     fun generateExportReport(): String {
-        updateSnapshot()
+        persistToDisk()
         val snap = _snapshot.value
         val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
         val startDateStr = dateFormat.format(Date(snap.startTimeMs))

@@ -51,6 +51,7 @@ import com.nullroute.ui.HelpDialog
 import com.nullroute.ui.MainViewModel
 import com.nullroute.ui.MainViewModelFactory
 import com.nullroute.ui.ProUpgradeDialog
+import com.nullroute.utils.CompanionDomainHelper
 import com.nullroute.utils.DomainNormalizer
 import com.nullroute.utils.SupportLogExporter
 import com.nullroute.vpn.DnsVpnService
@@ -612,44 +613,135 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
 
             // Add domain UI
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    OutlinedTextField(
-                        value = domainInput,
-                        onValueChange = { domainInput = it },
-                        label = { Text("Add custom domain") },
-                        placeholder = { Text("e.g. reddit.com") },
-                        supportingText = {
-                            Text("Domain only (e.g. reddit.com) • URLs are auto-cleaned", fontSize = 11.sp, color = Color.Gray)
-                        },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(
-                        onClick = {
-                            val input = domainInput.trim()
-                            val normalized = DomainNormalizer.normalize(input)
-                            if (normalized == null) {
-                                Toast.makeText(context, "Invalid domain format", Toast.LENGTH_SHORT).show()
-                            } else if (viewModel.blockedDomains.value.any { it.domain.equals(normalized, ignoreCase = true) }) {
-                                Toast.makeText(context, "Domain is already blocked", Toast.LENGTH_SHORT).show()
-                            } else if (!viewModel.canAddDomain()) {
-                                Toast.makeText(
-                                    context,
-                                    "Free tier limit reached (${MainViewModel.FREE_DOMAIN_LIMIT} domains). Upgrade to Pro for unlimited domains!",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                                showProDialog = true
-                            } else {
-                                pendingDomainToAdd = normalized
-                            }
-                        },
-                        modifier = Modifier.padding(top = 8.dp).height(56.dp)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top
                     ) {
-                        Text("Add")
+                        OutlinedTextField(
+                            value = domainInput,
+                            onValueChange = { domainInput = it },
+                            label = { Text("Add custom domain") },
+                            placeholder = { Text("e.g. reddit.com") },
+                            supportingText = {
+                                Text("Domain only (e.g. reddit.com) • URLs are auto-cleaned", fontSize = 11.sp, color = Color.Gray)
+                            },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = {
+                                val input = domainInput.trim()
+                                val normalized = DomainNormalizer.normalize(input)
+                                if (normalized == null) {
+                                    Toast.makeText(context, "Invalid domain format", Toast.LENGTH_SHORT).show()
+                                } else if (viewModel.blockedDomains.value.any { it.domain.equals(normalized, ignoreCase = true) }) {
+                                    Toast.makeText(context, "Domain is already blocked", Toast.LENGTH_SHORT).show()
+                                } else if (!viewModel.canAddDomain()) {
+                                    Toast.makeText(
+                                        context,
+                                        "Free tier limit reached (${MainViewModel.FREE_DOMAIN_LIMIT} domains). Upgrade to Pro for unlimited domains!",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    showProDialog = true
+                                } else {
+                                    pendingDomainToAdd = normalized
+                                }
+                            },
+                            modifier = Modifier.padding(top = 8.dp).height(56.dp)
+                        ) {
+                            Text("Add")
+                        }
+                    }
+
+                    // Companion App Domain Suggestion Chip (e.g. cdninstagram.com for instagram.com)
+                    val companionSuggestion = remember(domainInput, blockedDomains) {
+                        val inputTrimmed = domainInput.trim()
+                        if (inputTrimmed.length >= 3) {
+                            val info = CompanionDomainHelper.getCompanionDomain(inputTrimmed)
+                            if (info != null && blockedDomains.none { it.domain.equals(info.companionDomain, ignoreCase = true) }) {
+                                info
+                            } else null
+                        } else {
+                            // Check if any currently blocked domain has an unblocked companion domain
+                            blockedDomains.firstNotNullOfOrNull { blocked ->
+                                val info = CompanionDomainHelper.getCompanionDomain(blocked.domain)
+                                if (info != null && blockedDomains.none { it.domain.equals(info.companionDomain, ignoreCase = true) }) {
+                                    info
+                                } else null
+                            }
+                        }
+                    }
+
+                    if (companionSuggestion != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (viewModel.canAddDomain()) {
+                                        val success = viewModel.addDomain(companionSuggestion.companionDomain)
+                                        if (success) {
+                                            Toast.makeText(context, "Blocked ${companionSuggestion.companionDomain}!", Toast.LENGTH_SHORT).show()
+                                            if (isVpnActive) {
+                                                context.startService(Intent(context, DnsVpnService::class.java))
+                                            }
+                                        }
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "Free tier limit reached. Upgrade to Pro to add companion domain!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        showProDialog = true
+                                    }
+                                },
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FlashOn,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = "App Tip: Tap to also block ${companionSuggestion.companionDomain}",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = companionSuggestion.description,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "+ ADD",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(start = 8.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
