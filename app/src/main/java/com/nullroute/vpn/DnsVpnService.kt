@@ -149,6 +149,7 @@ class DnsVpnService : VpnService() {
 
         VpnStateTracker.isRunning.value = true
         startForegroundService()
+        PowerTelemetryTracker.register(this)
 
         vpnLoopThread = Thread({ runVpnLoop() }, "NullRouteVPNLoop").apply { start() }
 
@@ -157,6 +158,7 @@ class DnsVpnService : VpnService() {
 
     override fun onDestroy() {
         Log.i(TAG, "VPN Service Destroyed")
+        PowerTelemetryTracker.unregister(this)
         VpnStateTracker.isRunning.value = false
         unregisterNetworkCallback()
         stopSweeper()
@@ -470,6 +472,7 @@ class DnsVpnService : VpnService() {
             builder.addDnsServer("fd00:a:b:c::1")
 
             builder.setMtu(1500)
+            builder.setBlocking(true)
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
@@ -485,9 +488,10 @@ class DnsVpnService : VpnService() {
             getOrCreateForwardingSocket()
 
             val buffer = ByteArray(16384)
-            Log.i(TAG, "VPN Interface established, starting packet read loop")
+            Log.i(TAG, "VPN Interface established (blocking=true), starting packet read loop")
 
             var consecutiveReadErrors = 0
+            var consecutiveZeroReads = 0
             while (!Thread.currentThread().isInterrupted && VpnStateTracker.isRunning.value) {
                 val length = try {
                     val len = inputStream.read(buffer)
@@ -496,6 +500,7 @@ class DnsVpnService : VpnService() {
                 } catch (e: IOException) {
                     if (Thread.currentThread().isInterrupted || !VpnStateTracker.isRunning.value) break
                     consecutiveReadErrors++
+                    DnsTelemetryTracker.recordVpnReadError()
                     Log.w(TAG, "VPN read error ($consecutiveReadErrors): ${e.message}")
                     if (consecutiveReadErrors > 5) {
                         Log.e(TAG, "Too many consecutive VPN read errors, aborting loop")
@@ -513,7 +518,22 @@ class DnsVpnService : VpnService() {
                     Log.i(TAG, "EOF from VPN interface")
                     break
                 }
-                if (length == 0) continue
+                if (length == 0) {
+                    DnsTelemetryTracker.recordZeroLengthRead()
+                    consecutiveZeroReads++
+                    val sleepMs = if (consecutiveZeroReads > 5) 250L else 100L
+                    if (consecutiveZeroReads % 100 == 0) {
+                        Log.w(TAG, "Warning: $consecutiveZeroReads consecutive zero-length reads on TUN interface")
+                    }
+                    try {
+                        Thread.sleep(sleepMs)
+                    } catch (ie: InterruptedException) {
+                        break
+                    }
+                    continue
+                }
+                consecutiveZeroReads = 0
+                DnsTelemetryTracker.recordVpnPacketRead()
 
                 try {
                     processPacket(buffer, length, outputStream)
@@ -541,7 +561,7 @@ class DnsVpnService : VpnService() {
             val socket = forwardingSocket
             if (socket == null || socket.isClosed) {
                 try {
-                    Thread.sleep(50)
+                    Thread.sleep(250)
                 } catch (e: InterruptedException) {
                     break
                 }
@@ -554,6 +574,7 @@ class DnsVpnService : VpnService() {
 
                 val length = packet.length
                 if (length < 12) continue
+                DnsTelemetryTracker.recordUpstreamPacketReceived()
 
                 val upstreamTid = getShort(recvBuffer, 0).toShort()
                 val query = inFlightQueries.remove(upstreamTid) ?: continue
@@ -607,9 +628,10 @@ class DnsVpnService : VpnService() {
                 }
             } catch (e: Exception) {
                 if (Thread.currentThread().isInterrupted || !VpnStateTracker.isRunning.value) break
+                DnsTelemetryTracker.recordUpstreamReceiveError()
                 // If socket closed or network switched, sleep briefly to avoid 100% CPU busy-spin
                 try {
-                    Thread.sleep(100)
+                    Thread.sleep(250)
                 } catch (ie: InterruptedException) {
                     break
                 }

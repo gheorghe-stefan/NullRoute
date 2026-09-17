@@ -281,6 +281,32 @@ object DnsTelemetryTracker {
         }
     }
 
+    val totalVpnPacketsRead = AtomicLong(0)
+    val totalZeroLengthReads = AtomicLong(0)
+    val totalVpnReadErrors = AtomicLong(0)
+    val totalUpstreamPacketsReceived = AtomicLong(0)
+    val totalUpstreamReceiveErrors = AtomicLong(0)
+
+    fun recordVpnPacketRead() {
+        totalVpnPacketsRead.incrementAndGet()
+    }
+
+    fun recordZeroLengthRead() {
+        totalZeroLengthReads.incrementAndGet()
+    }
+
+    fun recordVpnReadError() {
+        totalVpnReadErrors.incrementAndGet()
+    }
+
+    fun recordUpstreamPacketReceived() {
+        totalUpstreamPacketsReceived.incrementAndGet()
+    }
+
+    fun recordUpstreamReceiveError() {
+        totalUpstreamReceiveErrors.incrementAndGet()
+    }
+
     private fun pruneOldTimestamps(now: Long) {
         val cutoff = now - QPS_WINDOW_MS
         while (true) {
@@ -472,6 +498,16 @@ object DnsTelemetryTracker {
             sb.appendLine("[7] Recent Persistent Telemetry Log History")
             sb.appendLine(recentLogs)
         }
+        sb.appendLine()
+        sb.appendLine("[8] Standby & Power Diagnostics")
+        sb.appendLine(PowerTelemetryTracker.formatStandbyReport())
+        sb.appendLine()
+        sb.appendLine("[9] VPN Loop & Low-Level I/O Metrics")
+        sb.appendLine("  TUN Packets Processed     : ${totalVpnPacketsRead.get()}")
+        sb.appendLine("  TUN Zero-Length Reads     : ${totalZeroLengthReads.get()}")
+        sb.appendLine("  TUN Read IOErrors         : ${totalVpnReadErrors.get()}")
+        sb.appendLine("  Upstream Responses Recv   : ${totalUpstreamPacketsReceived.get()}")
+        sb.appendLine("  Upstream Socket Errors    : ${totalUpstreamReceiveErrors.get()}")
         sb.appendLine("=============================================")
         return sb.toString()
     }
