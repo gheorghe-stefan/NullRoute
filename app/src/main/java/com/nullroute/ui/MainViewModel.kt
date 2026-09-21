@@ -12,6 +12,8 @@ import com.nullroute.billing.BillingProvider
 import com.nullroute.data.BlockedDomain
 import com.nullroute.data.BlocklistRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -69,6 +71,13 @@ class MainViewModel(
                 _isVpnActive.value = running
             }
         }
+        // Continuously refresh live telemetry snapshot while ViewModel is active (UI visible)
+        viewModelScope.launch(Dispatchers.Default) {
+            while (isActive) {
+                com.nullroute.vpn.DnsTelemetryTracker.updateSnapshot()
+                delay(1000L)
+            }
+        }
     }
 
     fun loadData() {
@@ -79,6 +88,7 @@ class MainViewModel(
     fun refreshStates(context: Context) {
         _isVpnActive.value = com.nullroute.vpn.VpnStateTracker.isRunning.value
         _isAccessibilityActive.value = isAccessibilityEnabled(context)
+        updateTelemetry()
         
         val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
         _isPermanentLockActive.value = prefs.getBoolean("permanent_lock", false)
@@ -129,6 +139,40 @@ class MainViewModel(
             loadData()
         }
         return success
+    }
+
+    fun restoreFromUri(context: Context, uri: android.net.Uri, onComplete: (Int) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                if (!content.isNullOrEmpty()) {
+                    val domains = if (content.trim().startsWith("[")) {
+                        com.nullroute.data.ExternalBlocklistBackupHelper.parseJson(content)
+                    } else {
+                        com.nullroute.data.ExternalBlocklistBackupHelper.parseTxt(content)
+                    }
+                    if (domains.isNotEmpty()) {
+                        val limit = if (isPro.value) domains.size else FREE_DOMAIN_LIMIT
+                        val toAdd = domains.take(limit)
+                        for (item in toAdd) {
+                            repository.addBlockedDomain(item.domain, item.isRemovable)
+                        }
+                        loadData()
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            onComplete(toAdd.size)
+                        }
+                        return@launch
+                    }
+                }
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete(0)
+                }
+            } catch (e: Exception) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete(-1)
+                }
+            }
+        }
     }
 
     fun freezeLock(context: Context) {

@@ -58,6 +58,15 @@ object DnsTelemetryTracker {
     private var versionLogFile: File? = null
     private const val MAX_LOG_FILES_TO_KEEP = 10
 
+    fun getFullVersionName(): String {
+        val raw = com.nullroute.BuildConfig.VERSION_NAME
+        return if (raw.count { it == '.' } >= 3) {
+            raw
+        } else {
+            "${raw}.${com.nullroute.BuildConfig.VERSION_CODE}"
+        }
+    }
+
     // All-time persistent counters (preserved across app versions / restarts)
     private val allTimeTotalQueries = AtomicLong(0)
     private val allTimeBlockedQueries = AtomicLong(0)
@@ -105,7 +114,7 @@ object DnsTelemetryTracker {
         }
         logsDir = dir
 
-        val versionName = com.nullroute.BuildConfig.VERSION_NAME
+        val versionName = getFullVersionName()
         val logFile = dir.resolve("telemetry_v${versionName}.log")
         versionLogFile = logFile
 
@@ -131,6 +140,8 @@ object DnsTelemetryTracker {
         } else {
             appendToLogFile("\n[$nowStr] === Process Restart / Reinstall (v$versionName) ===")
         }
+
+        updateSnapshot()
     }
 
     private fun cleanOldVersionLogs(dir: File, maxToKeep: Int) {
@@ -198,12 +209,20 @@ object DnsTelemetryTracker {
         }
     }
 
+    @Volatile
+    private var lastSnapshotUpdateMs = 0L
+
+    @Volatile
+    private var lastPersistTimeMs = 0L
+
     @Synchronized
     fun persistToDisk() {
         try {
             val currentQueries = totalQueries.get()
             val currentTimeouts = timeouts.get()
             if (currentQueries != lastLoggedQueries || currentTimeouts != lastLoggedTimeouts) {
+                lastLoggedQueries = currentQueries
+                lastLoggedTimeouts = currentTimeouts
                 updateSnapshot()
                 logSummaryToLogcat()
                 persistAllTimeStats()
@@ -234,6 +253,10 @@ object DnsTelemetryTracker {
         val currentQps = calculateCurrentQps(now)
         if (currentQps > peakQps) {
             peakQps = currentQps
+        }
+
+        if (now - lastSnapshotUpdateMs >= 1000L) {
+            updateSnapshot()
         }
     }
 
@@ -327,6 +350,7 @@ object DnsTelemetryTracker {
 
     fun updateSnapshot() {
         val now = System.currentTimeMillis()
+        lastSnapshotUpdateMs = now
         val uptimeSec = (now - startTimeMs) / 1000
         val total = totalQueries.get()
         val hits = cacheHits.get()
@@ -338,6 +362,11 @@ object DnsTelemetryTracker {
         val allTimeHits = allTimeCacheHits.get()
         val allTimeMisses = allTimeCacheMisses.get()
         val allTimeRatio = if (allTimeHits + allTimeMisses > 0) (allTimeHits.toDouble() / (allTimeHits + allTimeMisses) * 100.0) else 0.0
+
+        if (now - lastPersistTimeMs > 15_000L && allTimeTotal > 0L) {
+            lastPersistTimeMs = now
+            persistAllTimeStats()
+        }
 
         // Latency stats
         val latencies = latencySamples.toList()
@@ -446,7 +475,8 @@ object DnsTelemetryTracker {
         sb.appendLine("=== NULLROUTE TELEMETRY DIAGNOSTIC REPORT ===")
         sb.appendLine("Started At: $startDateStr")
         sb.appendLine("Report Time: $nowStr (Uptime: ${snap.uptimeSeconds}s)")
-        sb.appendLine("App Version: ${com.nullroute.BuildConfig.VERSION_NAME}")
+        val fullVersion = getFullVersionName()
+        sb.appendLine("App Version: $fullVersion")
         sb.appendLine()
         sb.appendLine("[1] Current Session Metrics")
         sb.appendLine("  Session Queries           : ${snap.totalQueries}")
@@ -465,7 +495,7 @@ object DnsTelemetryTracker {
         sb.appendLine("  All-Time Cache Hit Ratio  : ${String.format(Locale.US, "%.2f", snap.allTimeHitRatioPct)}%")
         sb.appendLine("  All-Time Blocked Queries  : ${snap.allTimeBlockedQueries}")
         sb.appendLine("  All-Time Allowed Queries  : ${snap.allTimeAllowedQueries}")
-        sb.appendLine("  Current Version Log       : /data/data/com.nullroute/files/logs/telemetry_v${com.nullroute.BuildConfig.VERSION_NAME}.log")
+        sb.appendLine("  Current Version Log       : /data/data/com.nullroute/files/logs/telemetry_v${fullVersion}.log")
         val availableLogs = getAvailableVersionLogs()
         if (availableLogs.isNotEmpty()) {
             sb.appendLine("  Archived Version Logs     : ${availableLogs.joinToString(", ")}")

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Visibility
@@ -97,6 +98,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        com.nullroute.vpn.DnsTelemetryTracker.updateSnapshot()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (::billingManager.isInitialized) {
@@ -170,6 +176,26 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         }
     }
 
+    // SAF Document Picker Launcher for restoring blocklist from external storage
+    val restoreFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.restoreFromUri(context, uri) { count ->
+                if (count > 0) {
+                    Toast.makeText(context, "Restored $count domains from backup!", Toast.LENGTH_SHORT).show()
+                    if (isVpnActive) {
+                        context.startService(Intent(context, DnsVpnService::class.java))
+                    }
+                } else if (count == 0) {
+                    Toast.makeText(context, "No valid domains found in selected file", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Failed to read backup file", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     // Auto-prompt VPN permission on app launch if not active
     LaunchedEffect(Unit) {
         if (!viewModel.isVpnActive.value) {
@@ -211,50 +237,203 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         )
     }
 
-    // Popup for adding domain: asks if entry is supposed to be removable or not
+    // Unified Popup for adding domain: Removability Mode & Companion App Domain Guidance
     if (pendingDomainToAdd != null) {
+        val domain = pendingDomainToAdd!!
+        val companionInfo = remember(domain) { CompanionDomainHelper.getCompanionDomain(domain) }
+        val hasCompanion = companionInfo != null && blockedDomains.none { it.domain.equals(companionInfo.companionDomain, ignoreCase = true) }
+        var alsoBlockCompanion by remember(domain) { mutableStateOf(hasCompanion) }
+        var selectedModeIsRemovable by remember(domain) { mutableStateOf(true) }
+
         AlertDialog(
             onDismissRequest = { pendingDomainToAdd = null },
-            title = { Text("Domain Removability Option") },
-            text = {
-                Text(
-                    "Is \"${pendingDomainToAdd}\" supposed to be removable later?\n\n" +
-                    "• Clicking YES will add the domain to blocked list FOREVER (non-removable).\n" +
-                    "• Clicking NO will add it as REMOVABLE (a delete icon will be shown)."
-                )
+            title = {
+                Text("Add to Blocklist", fontWeight = FontWeight.Bold)
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val domain = pendingDomainToAdd!!
-                        pendingDomainToAdd = null
-                        if (!viewModel.canUsePermanentLock()) {
-                            Toast.makeText(context, "Permanent (Forever) mode requires NullRoute Pro", Toast.LENGTH_SHORT).show()
-                            showProDialog = true
-                        } else {
-                            val success = viewModel.addDomain(domain, isRemovable = false)
-                            if (success) {
-                                domainInput = ""
-                                if (isVpnActive) {
-                                    context.startService(Intent(context, DnsVpnService::class.java))
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    // Target domain display
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = domain,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+
+                    // In-Dialog Mobile App Companion Guidance (if applicable)
+                    if (hasCompanion && companionInfo != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { alsoBlockCompanion = !alsoBlockCompanion }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = alsoBlockCompanion,
+                                    onCheckedChange = { alsoBlockCompanion = it }
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Also block ${companionInfo.companionDomain}",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = companionInfo.description,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
-                            } else {
-                                Toast.makeText(context, "Failed to add domain (duplicate or invalid)", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
-                ) {
-                    Text(if (isPro) "Yes (Forever)" else "Yes (Forever) 🔒")
+
+                    // Mode Selection Prompt
+                    Text(
+                        text = "How do you want to block this domain?",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Option 1: Flexible (Removable) - Default, Safe
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selectedModeIsRemovable) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        border = if (selectedModeIsRemovable) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedModeIsRemovable = true }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selectedModeIsRemovable,
+                                onClick = { selectedModeIsRemovable = true }
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Text(
+                                    text = "Flexible (Removable)",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Can be deleted or unblocked at any time.",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    // Option 2: Permanent (Forever) - Pro, Strict
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (!selectedModeIsRemovable) Color(0xFFF59E0B).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        border = if (!selectedModeIsRemovable) BorderStroke(1.5.dp, Color(0xFFF59E0B)) else BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedModeIsRemovable = false }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = !selectedModeIsRemovable,
+                                onClick = { selectedModeIsRemovable = false }
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "Permanent (Forever)",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (!isPro) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = Color(0xFFF59E0B).copy(alpha = 0.2f)
+                                        ) {
+                                            Text(
+                                                text = "PRO",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFF59E0B),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                Text(
+                                    text = "Strict self-control. Cannot be deleted once blocked.",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
                 }
             },
-            dismissButton = {
-                TextButton(
+            confirmButton = {
+                Button(
                     onClick = {
-                        val domain = pendingDomainToAdd!!
+                        val targetDomain = domain
                         pendingDomainToAdd = null
-                        val success = viewModel.addDomain(domain, isRemovable = true)
+
+                        if (!selectedModeIsRemovable && !viewModel.canUsePermanentLock()) {
+                            Toast.makeText(context, "Permanent (Forever) mode requires NullRoute Pro", Toast.LENGTH_SHORT).show()
+                            showProDialog = true
+                            return@Button
+                        }
+
+                        val success = viewModel.addDomain(targetDomain, isRemovable = selectedModeIsRemovable)
                         if (success) {
                             domainInput = ""
+                            // If companion requested, also add it
+                            if (hasCompanion && alsoBlockCompanion && companionInfo != null) {
+                                if (viewModel.canAddDomain()) {
+                                    viewModel.addDomain(companionInfo.companionDomain, isRemovable = selectedModeIsRemovable)
+                                    Toast.makeText(context, "Blocked $targetDomain & ${companionInfo.companionDomain}!", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Blocked $targetDomain. (Companion skipped: free limit reached)", Toast.LENGTH_SHORT).show()
+                                    showProDialog = true
+                                }
+                            } else {
+                                Toast.makeText(context, "Blocked $targetDomain!", Toast.LENGTH_SHORT).show()
+                            }
+
                             if (isVpnActive) {
                                 context.startService(Intent(context, DnsVpnService::class.java))
                             }
@@ -263,7 +442,12 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         }
                     }
                 ) {
-                    Text("No (Removable)")
+                    Text("Add to Blocklist")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDomainToAdd = null }) {
+                    Text("Cancel")
                 }
             }
         )
@@ -374,6 +558,12 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                             "NullRoute",
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Text(
+                            text = "v${getAppVersion(context)}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                         )
                         if (isPro) {
                             Surface(
@@ -654,95 +844,6 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                             Text("Add")
                         }
                     }
-
-                    // Companion App Domain Suggestion Chip (e.g. cdninstagram.com for instagram.com)
-                    val companionSuggestion = remember(domainInput, blockedDomains) {
-                        val inputTrimmed = domainInput.trim()
-                        if (inputTrimmed.length >= 3) {
-                            val info = CompanionDomainHelper.getCompanionDomain(inputTrimmed)
-                            if (info != null && blockedDomains.none { it.domain.equals(info.companionDomain, ignoreCase = true) }) {
-                                info
-                            } else null
-                        } else {
-                            // Check if any currently blocked domain has an unblocked companion domain
-                            blockedDomains.firstNotNullOfOrNull { blocked ->
-                                val info = CompanionDomainHelper.getCompanionDomain(blocked.domain)
-                                if (info != null && blockedDomains.none { it.domain.equals(info.companionDomain, ignoreCase = true) }) {
-                                    info
-                                } else null
-                            }
-                        }
-                    }
-
-                    if (companionSuggestion != null) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    if (viewModel.canAddDomain()) {
-                                        val success = viewModel.addDomain(companionSuggestion.companionDomain)
-                                        if (success) {
-                                            Toast.makeText(context, "Blocked ${companionSuggestion.companionDomain}!", Toast.LENGTH_SHORT).show()
-                                            if (isVpnActive) {
-                                                context.startService(Intent(context, DnsVpnService::class.java))
-                                            }
-                                        }
-                                    } else {
-                                        Toast.makeText(
-                                            context,
-                                            "Free tier limit reached. Upgrade to Pro to add companion domain!",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                        showProDialog = true
-                                    }
-                                },
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.FlashOn,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        Text(
-                                            text = "App Tip: Tap to also block ${companionSuggestion.companionDomain}",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Text(
-                                            text = companionSuggestion.description,
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                                Text(
-                                    text = "+ ADD",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(start = 8.dp)
-                                )
-                            }
-                        }
-                    }
                 }
             }
 
@@ -796,6 +897,12 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         val clip = ClipData.newPlainText("NullRoute Telemetry Report", report)
                         clipboard.setPrimaryClip(clip)
                         Toast.makeText(context, "Telemetry report copied to clipboard!", Toast.LENGTH_SHORT).show()
+                    },
+                    onRestoreBackup = {
+                        restoreFileLauncher.launch(arrayOf("text/*", "application/json", "*/*"))
+                    },
+                    onExportBackup = {
+                        shareBlocklistBackup(context, blockedDomains)
                     }
                 )
             }
@@ -937,9 +1044,15 @@ fun DomainItem(
 fun getAppVersion(context: Context): String {
     return try {
         val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-        packageInfo.versionName ?: "1.0.0-test"
+        val full = packageInfo.versionName ?: "1.0.0"
+        val parts = full.split(".")
+        if (parts.size >= 3) {
+            "${parts[0]}.${parts[1]}.${parts[2]}"
+        } else {
+            full
+        }
     } catch (e: Exception) {
-        "1.0.0-test"
+        "1.0.0"
     }
 }
 
@@ -947,7 +1060,9 @@ fun getAppVersion(context: Context): String {
 fun DiagnosticsCard(
     telemetry: com.nullroute.vpn.TelemetrySnapshot,
     onShareLogs: () -> Unit,
-    onCopyReport: () -> Unit
+    onCopyReport: () -> Unit,
+    onRestoreBackup: () -> Unit,
+    onExportBackup: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -996,6 +1111,25 @@ fun DiagnosticsCard(
                 Spacer(modifier = Modifier.height(12.dp))
                 Divider(color = MaterialTheme.colorScheme.background)
                 Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Build Version",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                    Text(
+                        text = "v${com.nullroute.BuildConfig.VERSION_NAME}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Stats Grid
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1052,8 +1186,52 @@ fun DiagnosticsCard(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Copy Diagnostic Text Report", fontSize = 13.sp)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Blocklist Backup / Restore buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onRestoreBackup,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.SettingsBackupRestore, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Restore File", fontSize = 12.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = onExportBackup,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Export Backup", fontSize = 12.sp)
+                    }
+                }
             }
         }
+    }
+}
+
+fun shareBlocklistBackup(context: Context, domains: List<BlockedDomain>) {
+    if (domains.isEmpty()) {
+        Toast.makeText(context, "No domains in blocklist to export", Toast.LENGTH_SHORT).show()
+        return
+    }
+    try {
+        val txtContent = com.nullroute.data.ExternalBlocklistBackupHelper.serializeToTxt(domains)
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "NullRoute Blocklist Backup")
+            putExtra(Intent.EXTRA_TEXT, txtContent)
+        }
+        context.startActivity(Intent.createChooser(sendIntent, "Export Blocklist Backup"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Failed to share blocklist", Toast.LENGTH_SHORT).show()
     }
 }
 

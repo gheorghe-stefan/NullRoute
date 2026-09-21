@@ -24,9 +24,37 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
     private var cachedDomains: List<BlockedDomain> = emptyList()
     private var lastModifiedTime: Long = -1L
 
+    private fun persistList(list: List<BlockedDomain>): Boolean {
+        return try {
+            file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
+            cachedDomains = list
+            lastModifiedTime = file.lastModified()
+            ExternalBlocklistBackupHelper.saveBackup(context, list)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist domains", e)
+            false
+        }
+    }
+
     override fun getBlockedDomains(): List<BlockedDomain> {
         return synchronized(this) {
-            if (!file.exists()) {
+            if (!file.exists() || file.length() == 0L) {
+                // Attempt to restore from external backup if available (e.g. across reinstalls)
+                try {
+                    val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
+                    val isPro = prefs.getBoolean("is_pro_unlocked", false)
+                    val restored = ExternalBlocklistBackupHelper.loadBackup(context, isPro)
+                    if (!restored.isNullOrEmpty()) {
+                        file.writeText(restored.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
+                        cachedDomains = restored
+                        lastModifiedTime = file.lastModified()
+                        Log.i(TAG, "Restored ${restored.size} domains from external backup")
+                        return@synchronized cachedDomains
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to restore backup", e)
+                }
                 cachedDomains = emptyList()
                 lastModifiedTime = -1L
                 return@synchronized emptyList()
@@ -44,6 +72,9 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
                             BlockedDomain(domain = normalized, isRemovable = isRemovable)
                         }
                     lastModifiedTime = currentModified
+                    if (cachedDomains.isNotEmpty()) {
+                        ExternalBlocklistBackupHelper.saveBackup(context, cachedDomains)
+                    }
                 } catch (e: Exception) {
                     // Ignore and keep using cache on read failure
                 }
@@ -68,14 +99,7 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
             val list = getBlockedDomains().toMutableList()
             val newEntry = BlockedDomain(domain = normalized, isRemovable = isRemovable)
             list.add(newEntry)
-            try {
-                file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
-                cachedDomains = list
-                lastModifiedTime = file.lastModified()
-                true
-            } catch (e: Exception) {
-                false
-            }
+            persistList(list)
         }
     }
 
@@ -95,15 +119,10 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
             }
 
             if (addedCount > 0) {
-                try {
-                    file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
-                    cachedDomains = list
-                    lastModifiedTime = file.lastModified()
-                } catch (e: Exception) {
-                    return@synchronized 0
-                }
+                if (persistList(list)) addedCount else 0
+            } else {
+                0
             }
-            addedCount
         }
     }
 
@@ -120,14 +139,7 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
             }
 
             list.remove(target)
-            try {
-                file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
-                cachedDomains = list
-                lastModifiedTime = file.lastModified()
-                true
-            } catch (e: Exception) {
-                false
-            }
+            persistList(list)
         }
     }
 
@@ -140,14 +152,7 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
             if (index == -1) return@synchronized false
 
             list[index] = list[index].copy(isRemovable = isRemovable)
-            try {
-                file.writeText(list.joinToString("\n") { "${it.domain}|${it.isRemovable}" })
-                cachedDomains = list
-                lastModifiedTime = file.lastModified()
-                true
-            } catch (e: Exception) {
-                false
-            }
+            persistList(list)
         }
     }
 }

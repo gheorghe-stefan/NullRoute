@@ -53,7 +53,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = currentBuildNumber
-        versionName = "1.0.0"
+        versionName = "1.0.0.$currentBuildNumber"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -145,4 +145,5 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
 }

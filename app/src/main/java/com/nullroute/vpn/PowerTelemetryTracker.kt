@@ -97,6 +97,7 @@ object PowerTelemetryTracker {
     fun onScreenOff(context: Context) {
         val now = System.currentTimeMillis()
         val batteryPct = getBatteryPercentage(context)
+        DnsTelemetryTracker.updateSnapshot()
         val queries = DnsTelemetryTracker.snapshot.value.totalQueries
         val zeroReads = DnsTelemetryTracker.totalZeroLengthReads.get()
         val packets = DnsTelemetryTracker.totalVpnPacketsRead.get()
@@ -118,6 +119,7 @@ object PowerTelemetryTracker {
         if (!isScreenOff || screenOffTimeMs == 0L) return
         val now = System.currentTimeMillis()
         val batteryPct = getBatteryPercentage(context)
+        DnsTelemetryTracker.updateSnapshot()
         val queries = DnsTelemetryTracker.snapshot.value.totalQueries
         val zeroReads = DnsTelemetryTracker.totalZeroLengthReads.get()
         val packets = DnsTelemetryTracker.totalVpnPacketsRead.get()
