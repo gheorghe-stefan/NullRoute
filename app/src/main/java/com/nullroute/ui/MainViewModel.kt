@@ -141,40 +141,6 @@ class MainViewModel(
         return success
     }
 
-    fun restoreFromUri(context: Context, uri: android.net.Uri, onComplete: (Int) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
-                if (!content.isNullOrEmpty()) {
-                    val domains = if (content.trim().startsWith("[")) {
-                        com.nullroute.data.ExternalBlocklistBackupHelper.parseJson(content)
-                    } else {
-                        com.nullroute.data.ExternalBlocklistBackupHelper.parseTxt(content)
-                    }
-                    if (domains.isNotEmpty()) {
-                        val limit = if (isPro.value) domains.size else FREE_DOMAIN_LIMIT
-                        val toAdd = domains.take(limit)
-                        for (item in toAdd) {
-                            repository.addBlockedDomain(item.domain, item.isRemovable)
-                        }
-                        loadData()
-                        kotlinx.coroutines.withContext(Dispatchers.Main) {
-                            onComplete(toAdd.size)
-                        }
-                        return@launch
-                    }
-                }
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    onComplete(0)
-                }
-            } catch (e: Exception) {
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    onComplete(-1)
-                }
-            }
-        }
-    }
-
     fun freezeLock(context: Context) {
         val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("permanent_lock", true).apply()

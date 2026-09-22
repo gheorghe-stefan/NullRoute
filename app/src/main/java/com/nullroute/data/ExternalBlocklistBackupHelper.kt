@@ -15,93 +15,105 @@ import java.io.File
 object ExternalBlocklistBackupHelper {
 
     private const val TAG = "NullRouteBackup"
-    private const val BACKUP_DIR_NAME = "NullRoute"
+    const val HIDDEN_DIR_NAME = ".nullroute"
+    const val HIDDEN_TXT_NAME = ".blocked_domains.txt"
+    const val BACKUP_DIR_NAME = "NullRoute"
     const val TXT_FILE_NAME = "blocked_domains.txt"
     const val JSON_FILE_NAME = "blocked_domains.json"
 
     /**
      * Saves blocked domains in order to external storage (Documents / Downloads) as strictly ONE file.
-     * Overwrites any existing backup and cleans up any legacy numbered files.
+     * Writes to hidden directories (.nullroute/.blocked_domains.txt) so it is not visible to users.
      */
     fun saveBackup(context: Context, domains: List<BlockedDomain>) {
         try {
             val txtString = serializeToTxt(domains)
 
             var savedDirectly = false
-            // 1. Save to public Documents/NullRoute/blocked_domains.txt
+            // 1. Save to hidden Documents/.nullroute/.blocked_domains.txt
             if (trySaveToPublicDirectory(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                HIDDEN_DIR_NAME,
+                HIDDEN_TXT_NAME,
                 txtString
             )) {
                 savedDirectly = true
             }
 
-            // 2. Save to public Download/NullRoute/blocked_domains.txt
+            // 2. Save to hidden Download/.nullroute/.blocked_domains.txt
             if (trySaveToPublicDirectory(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                HIDDEN_DIR_NAME,
+                HIDDEN_TXT_NAME,
                 txtString
             )) {
                 savedDirectly = true
             }
 
-            // 3. Only use MediaStore fallback if direct write was blocked, to avoid duplicate numbered files
+            // 3. Also mirror to standard Documents/NullRoute/blocked_domains.txt
+            trySaveToPublicDirectory(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+                BACKUP_DIR_NAME,
+                TXT_FILE_NAME,
+                txtString
+            )
+
+            // 4. Also mirror to standard Download/NullRoute/blocked_domains.txt
+            trySaveToPublicDirectory(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                BACKUP_DIR_NAME,
+                TXT_FILE_NAME,
+                txtString
+            )
+
+            // 5. Only use MediaStore fallback if direct write was blocked
             if (!savedDirectly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 saveToMediaStore(context, TXT_FILE_NAME, "text/plain", txtString)
             }
 
-            Log.i(TAG, "Successfully backed up ${domains.size} domains to external storage (strictly one file)")
+            Log.i(TAG, "Successfully backed up ${domains.size} domains to hidden external storage")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to complete external backup", e)
         }
     }
 
     /**
-     * Looks for existing backup file on the device across known locations.
+     * Looks for existing backup file on the device across known hidden and public locations.
      * If found, returns the domains in preserved order.
      * If isPro is false, takes only the first 2 entries as requested.
      */
     fun loadBackup(context: Context, isPro: Boolean): List<BlockedDomain>? {
-        // 1. Check public Documents directory directly for blocked_domains.txt
+        val searchLocations = listOf(
+            Pair(Environment.DIRECTORY_DOCUMENTS, HIDDEN_DIR_NAME to HIDDEN_TXT_NAME),
+            Pair(Environment.DIRECTORY_DOWNLOADS, HIDDEN_DIR_NAME to HIDDEN_TXT_NAME),
+            Pair(Environment.DIRECTORY_DOCUMENTS, BACKUP_DIR_NAME to TXT_FILE_NAME),
+            Pair(Environment.DIRECTORY_DOWNLOADS, BACKUP_DIR_NAME to TXT_FILE_NAME)
+        )
+
+        for ((pubDirName, filePair) in searchLocations) {
+            val (dirName, fileName) = filePair
+            try {
+                val dir = File(Environment.getExternalStoragePublicDirectory(pubDirName), dirName)
+                val targetFile = File(dir, fileName)
+                if (targetFile.exists() && targetFile.length() > 0) {
+                    val list = parseTxt(targetFile.readText())
+                    if (list.isNotEmpty()) {
+                        Log.i(TAG, "Loaded ${list.size} domains from $pubDirName/$dirName/$fileName")
+                        return applyProLimit(list, isPro)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed reading $pubDirName/$dirName/$fileName: ${e.message}")
+            }
+        }
+
+        // Check directory file scans for legacy files
         val docsDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), BACKUP_DIR_NAME)
-        val docsFile = File(docsDir, TXT_FILE_NAME)
-        if (docsFile.exists() && docsFile.length() > 0) {
-            try {
-                val list = parseTxt(docsFile.readText())
-                if (list.isNotEmpty()) {
-                    Log.i(TAG, "Loaded ${list.size} domains from Documents/$BACKUP_DIR_NAME/$TXT_FILE_NAME")
-                    return applyProLimit(list, isPro)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed reading docs file", e)
-            }
-        }
-
-        // 2. Check public Download directory directly for blocked_domains.txt
         val downloadDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), BACKUP_DIR_NAME)
-        val downloadFile = File(downloadDir, TXT_FILE_NAME)
-        if (downloadFile.exists() && downloadFile.length() > 0) {
-            try {
-                val list = parseTxt(downloadFile.readText())
-                if (list.isNotEmpty()) {
-                    Log.i(TAG, "Loaded ${list.size} domains from Download/$BACKUP_DIR_NAME/$TXT_FILE_NAME")
-                    return applyProLimit(list, isPro)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed reading download file", e)
-            }
-        }
+        loadFromDirectory(docsDir, isPro)?.let { return it }
+        loadFromDirectory(downloadDir, isPro)?.let { return it }
 
-        // 3. Fallback: check legacy directory files (in case numbered files like (15) exist)
-        loadFromDirectory(docsDir, isPro)?.let { list ->
-            Log.i(TAG, "Loaded ${list.size} domains from legacy Documents directory scan")
-            return list
-        }
-        loadFromDirectory(downloadDir, isPro)?.let { list ->
-            Log.i(TAG, "Loaded ${list.size} domains from legacy Download directory scan")
-            return list
-        }
-
-        // 4. Try MediaStore
+        // Fallback to MediaStore
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             loadFromMediaStore(context)?.let { list ->
                 Log.i(TAG, "Loaded ${list.size} domains from MediaStore backup")
@@ -116,9 +128,9 @@ object ExternalBlocklistBackupHelper {
         return if (isPro) domains else domains.take(2)
     }
 
-    fun trySaveToPublicDirectory(parentDir: File, txtContent: String): Boolean {
+    fun trySaveToPublicDirectory(parentDir: File, dirName: String, fileName: String, txtContent: String): Boolean {
         return try {
-            val dir = File(parentDir, BACKUP_DIR_NAME)
+            val dir = File(parentDir, dirName)
             if (!dir.exists()) {
                 dir.mkdirs()
             }
@@ -126,14 +138,14 @@ object ExternalBlocklistBackupHelper {
                 // Clean up any other files in the directory to strictly keep ONE file
                 try {
                     dir.listFiles()?.forEach { file ->
-                        if (file.name != TXT_FILE_NAME) {
+                        if (file.name != fileName) {
                             file.delete()
                         }
                     }
                 } catch (e: Exception) {
                     // Ignore cleanup failure
                 }
-                val file = File(dir, TXT_FILE_NAME)
+                val file = File(dir, fileName)
                 file.writeText(txtContent)
                 file.exists() && file.length() > 0
             } else {
@@ -142,6 +154,10 @@ object ExternalBlocklistBackupHelper {
         } catch (e: Exception) {
             false
         }
+    }
+
+    fun trySaveToPublicDirectory(parentDir: File, txtContent: String): Boolean {
+        return trySaveToPublicDirectory(parentDir, BACKUP_DIR_NAME, TXT_FILE_NAME, txtContent)
     }
 
     @Suppress("UNUSED_PARAMETER")
@@ -325,6 +341,7 @@ object ExternalBlocklistBackupHelper {
     }
 
     fun parseJson(jsonString: String): List<BlockedDomain> {
+        val seen = mutableSetOf<String>()
         val list = mutableListOf<BlockedDomain>()
         try {
             val array = JSONArray(jsonString)
@@ -332,6 +349,7 @@ object ExternalBlocklistBackupHelper {
                 val obj = array.getJSONObject(i)
                 val domainRaw = obj.optString("domain", "")
                 val normalized = DomainNormalizer.normalize(domainRaw) ?: continue
+                if (!seen.add(normalized)) continue
                 val isRemovable = obj.optBoolean("isRemovable", true)
                 list.add(BlockedDomain(domain = normalized, isRemovable = isRemovable))
             }
@@ -349,6 +367,7 @@ object ExternalBlocklistBackupHelper {
                 val domainMatch = domainRegex.find(objStr) ?: continue
                 val domainRaw = domainMatch.groupValues[1]
                 val normalized = DomainNormalizer.normalize(domainRaw) ?: continue
+                if (!seen.add(normalized)) continue
                 val removableMatch = removableRegex.find(objStr)
                 val isRemovable = removableMatch?.groupValues?.get(1)?.toBooleanStrictOrNull() ?: true
                 list.add(BlockedDomain(domain = normalized, isRemovable = isRemovable))
@@ -360,14 +379,17 @@ object ExternalBlocklistBackupHelper {
     }
 
     fun parseTxt(txtString: String): List<BlockedDomain> {
-        return txtString.lines()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-            .mapNotNull { line ->
-                val parts = line.split("|")
-                val normalized = DomainNormalizer.normalize(parts[0]) ?: return@mapNotNull null
-                val isRemovable = if (parts.size > 1) parts[1].toBooleanStrictOrNull() ?: true else true
-                BlockedDomain(domain = normalized, isRemovable = isRemovable)
-            }
+        val seen = mutableSetOf<String>()
+        val result = mutableListOf<BlockedDomain>()
+        for (rawLine in txtString.lines()) {
+            val line = rawLine.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val parts = line.split("|")
+            val normalized = DomainNormalizer.normalize(parts[0]) ?: continue
+            if (!seen.add(normalized)) continue
+            val isRemovable = if (parts.size > 1) parts[1].toBooleanStrictOrNull() ?: true else true
+            result.add(BlockedDomain(domain = normalized, isRemovable = isRemovable))
+        }
+        return result
     }
 }

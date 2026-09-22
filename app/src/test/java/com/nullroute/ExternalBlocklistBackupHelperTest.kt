@@ -173,4 +173,53 @@ class ExternalBlocklistBackupHelperTest {
         assertEquals("blocked_domains.txt", remainingFiles[0])
         assertEquals(newTxt, java.io.File(backupDir, "blocked_domains.txt").readText())
     }
+
+    @Test
+    fun testInvalidSyntaxDomainsAreIgnored() {
+        val rawTxt = """
+            # Comments should be ignored
+            valid-domain.com|true|removable
+            notadomain|true|removable
+            http://another-valid.org/path|false|permanent
+            invalid..dot|true|removable
+            .leadingdot.com|true|removable
+            third-valid.net|true|removable
+            :::invalid:::|true|removable
+        """.trimIndent()
+
+        val parsed = ExternalBlocklistBackupHelper.parseTxt(rawTxt)
+        assertEquals(3, parsed.size)
+        assertEquals("valid-domain.com", parsed[0].domain)
+        assertEquals(true, parsed[0].isRemovable)
+
+        assertEquals("another-valid.org", parsed[1].domain)
+        assertEquals(false, parsed[1].isRemovable)
+
+        assertEquals("third-valid.net", parsed[2].domain)
+        assertEquals(true, parsed[2].isRemovable)
+    }
+
+    @Test
+    fun testDuplicateDomainsAreIgnoredPreservingFirstOccurrence() {
+        val rawTxt = """
+            reddit.com|true|removable
+            https://www.reddit.com/|false|permanent
+            REDDIT.COM|true|removable
+            twitter.com|false|permanent
+        """.trimIndent()
+
+        val parsed = ExternalBlocklistBackupHelper.parseTxt(rawTxt)
+        assertEquals(2, parsed.size)
+        assertEquals("reddit.com", parsed[0].domain)
+        assertEquals(true, parsed[0].isRemovable) // first occurrence preserved
+        assertEquals("twitter.com", parsed[1].domain)
+        assertEquals(false, parsed[1].isRemovable)
+    }
+
+    @Test
+    fun testNonExistentDirectoryReturnsNull() {
+        val nonExistentDir = java.io.File(tempFolder.root, "does_not_exist")
+        val result = ExternalBlocklistBackupHelper.loadFromDirectory(nonExistentDir, isPro = true)
+        org.junit.Assert.assertNull(result)
+    }
 }
