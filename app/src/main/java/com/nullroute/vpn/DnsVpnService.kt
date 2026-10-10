@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -210,6 +211,20 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun updateUnderlyingNetworks(network: Network?) {
+        try {
+            if (network != null) {
+                setUnderlyingNetworks(arrayOf(network))
+                Log.i(TAG, "Updated underlying network: $network")
+            } else {
+                setUnderlyingNetworks(null)
+                Log.i(TAG, "Cleared underlying networks (reverting to system default)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set underlying networks", e)
+        }
+    }
+
     private fun registerNetworkCallback() {
         try {
             connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -218,20 +233,30 @@ class DnsVpnService : VpnService() {
                     Log.i(TAG, "Network switched/available: recreating protected upstream socket for $network")
                     updateDynamicUpstreamDns(network)
                     rebuildForwardingSocket(network)
+                    updateUnderlyingNetworks(network)
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    // Refresh underlying network whenever capabilities change (e.g. Wi-Fi validation, unmetered status)
+                    updateUnderlyingNetworks(network)
                 }
 
                 override fun onLinkPropertiesChanged(network: Network, linkProperties: android.net.LinkProperties) {
                     updateDynamicUpstreamDns(network)
+                    updateUnderlyingNetworks(network)
                 }
 
                 override fun onLost(network: Network) {
                     Log.i(TAG, "Network lost: resetting upstream socket")
                     updateDynamicUpstreamDns(null)
                     rebuildForwardingSocket()
+                    updateUnderlyingNetworks(connectivityManager?.activeNetwork)
                 }
             }
             connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
-            updateDynamicUpstreamDns(connectivityManager?.activeNetwork)
+            val currentActive = connectivityManager?.activeNetwork
+            updateDynamicUpstreamDns(currentActive)
+            updateUnderlyingNetworks(currentActive)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register NetworkCallback", e)
         }
@@ -461,6 +486,17 @@ class DnsVpnService : VpnService() {
             val builder = Builder()
             builder.setSession("NullRouteVPN")
 
+            // 1. Allow all applications to bypass the VPN for direct non-DNS connections.
+            // Essential for Google Photos, Google Play Store, Chromecast, and local LAN services.
+            builder.allowBypass()
+
+            // 2. Explicitly mark the VPN as unmetered on Android 10+ (API 29+).
+            // Prevents Android from tagging the network as metered mobile data, which causes
+            // Google Photos ("Back up only on Wi-Fi") and Google Play Store to pause with "Waiting for Wi-Fi".
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setMetered(false)
+            }
+
             // IPv4 Setup
             builder.addAddress("10.0.0.2", 32)
             builder.addRoute("10.0.0.0", 24)
@@ -479,6 +515,9 @@ class DnsVpnService : VpnService() {
                 Log.e(TAG, "Failed to establish VPN interface")
                 return
             }
+
+            // Bind current physical network to newly established VPN interface
+            updateUnderlyingNetworks(connectivityManager?.activeNetwork)
 
             val inputStream = FileInputStream(vpnInterface!!.fileDescriptor)
             val outputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
