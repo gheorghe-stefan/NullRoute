@@ -46,6 +46,14 @@ class MainViewModelTest {
             return count
         }
 
+        override fun restoreBlockedDomains(domains: List<BlockedDomain>): Int {
+            var count = 0
+            for (d in domains) {
+                if (addBlockedDomain(d.domain, d.isRemovable)) count++
+            }
+            return count
+        }
+
         override fun removeBlockedDomain(domain: String, force: Boolean): Boolean {
             val normalized = com.nullroute.utils.DomainNormalizer.normalize(domain) ?: return false
             val item = domains.find { it.domain == normalized } ?: return false
@@ -232,5 +240,43 @@ class MainViewModelTest {
         mockBillingProvider.setPro(true)
         assertTrue(viewModel.convertToPermanent("site.com"))
         assertFalse(viewModel.blockedDomains.value[0].isRemovable)
+    }
+
+    @Test
+    fun testRestoreFromTextFreeTierLimitsToTwo() {
+        val txt = "site1.com|false|permanent\nsite2.com|true|removable\nsite3.com|false|permanent"
+        val count = viewModel.restoreFromText(txt)
+        assertEquals(2, count)
+        assertEquals(2, viewModel.blockedDomains.value.size)
+        assertEquals("site1.com", viewModel.blockedDomains.value[0].domain)
+        assertEquals(false, viewModel.blockedDomains.value[0].isRemovable)
+    }
+
+    @Test
+    fun testRestoreFromTextProRestoresAll() {
+        mockBillingProvider.setPro(true)
+        val txt = "site1.com|false|permanent\nsite2.com|true|removable\nsite3.com|false|permanent"
+        val count = viewModel.restoreFromText(txt)
+        assertEquals(3, count)
+        assertEquals(3, viewModel.blockedDomains.value.size)
+    }
+
+    @Test
+    fun testRestoreFromTextForceBypassesFreeLimit() {
+        val txt = "site1.com|false|permanent\nsite2.com|true|removable\nsite3.com|false|permanent"
+        val count = viewModel.restoreFromText(txt, force = true)
+        assertEquals(3, count)
+        // Since isPro is still false in billing provider, viewModel.loadData caps the active UI view to 2,
+        // but the repository received all 3
+        assertEquals(3, mockRepository.domains.size)
+    }
+
+    @Test
+    fun testRestoreFromTextCommaSeparated() {
+        mockBillingProvider.setPro(true)
+        val list = "site1.com, site2.com; site3.com"
+        val count = viewModel.restoreFromText(list)
+        assertEquals(3, count)
+        assertEquals(3, viewModel.blockedDomains.value.size)
     }
 }

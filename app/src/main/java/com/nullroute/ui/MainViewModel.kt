@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.net.Uri
 
 class MainViewModel(
     private val repository: BlocklistRepository,
@@ -139,6 +141,50 @@ class MainViewModel(
             loadData()
         }
         return success
+    }
+
+    fun restoreFromUri(context: Context, uri: Uri, force: Boolean = false, onComplete: (Int) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                if (!content.isNullOrEmpty()) {
+                    val count = restoreFromText(content, force = force)
+                    withContext(Dispatchers.Main) {
+                        onComplete(count)
+                    }
+                    return@launch
+                }
+                withContext(Dispatchers.Main) {
+                    onComplete(0)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onComplete(-1)
+                }
+            }
+        }
+    }
+
+    fun restoreFromText(content: String, force: Boolean = false): Int {
+        val trimmed = content.trim()
+        val parsed = if (trimmed.startsWith("[")) {
+            com.nullroute.data.ExternalBlocklistBackupHelper.parseJson(trimmed)
+        } else {
+            val txtToParse = if (trimmed.contains("\n")) trimmed else trimmed.replace(";", "\n").replace(",", "\n")
+            com.nullroute.data.ExternalBlocklistBackupHelper.parseTxt(txtToParse)
+        }
+        return restoreDomains(parsed, force = force)
+    }
+
+    fun restoreDomains(domains: List<BlockedDomain>, force: Boolean = false): Int {
+        if (domains.isNotEmpty()) {
+            val limit = if (force || isPro.value) domains.size else FREE_DOMAIN_LIMIT
+            val toAdd = domains.take(limit)
+            val added = repository.restoreBlockedDomains(toAdd)
+            loadData()
+            return added
+        }
+        return 0
     }
 
     fun freezeLock(context: Context) {

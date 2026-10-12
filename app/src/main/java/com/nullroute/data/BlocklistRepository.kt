@@ -9,6 +9,7 @@ interface BlocklistRepository {
     fun getBlockedDomainStrings(): Set<String>
     fun addBlockedDomain(domain: String, isRemovable: Boolean = true): Boolean
     fun addBlockedDomains(domains: List<String>, isRemovable: Boolean = true): Int
+    fun restoreBlockedDomains(domains: List<BlockedDomain>): Int
     fun removeBlockedDomain(domain: String, force: Boolean = false): Boolean
     fun updateDomainRemovable(domain: String, isRemovable: Boolean): Boolean
 }
@@ -113,6 +114,29 @@ class FileBlocklistRepository(private val context: Context) : BlocklistRepositor
                 val normalized = DomainNormalizer.normalize(domain) ?: continue
                 if (!existing.contains(normalized)) {
                     list.add(BlockedDomain(domain = normalized, isRemovable = isRemovable))
+                    existing.add(normalized)
+                    addedCount++
+                }
+            }
+
+            if (addedCount > 0) {
+                if (persistList(list)) addedCount else 0
+            } else {
+                0
+            }
+        }
+    }
+
+    override fun restoreBlockedDomains(domains: List<BlockedDomain>): Int {
+        return synchronized(this) {
+            val existing = getBlockedDomainStrings().toMutableSet()
+            val list = getBlockedDomains().toMutableList()
+            var addedCount = 0
+
+            for (item in domains) {
+                val normalized = DomainNormalizer.normalize(item.domain) ?: continue
+                if (!existing.contains(normalized)) {
+                    list.add(BlockedDomain(domain = normalized, isRemovable = item.isRemovable))
                     existing.add(normalized)
                     addedCount++
                 }

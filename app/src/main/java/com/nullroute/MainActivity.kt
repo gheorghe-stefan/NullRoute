@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Visibility
@@ -59,12 +60,17 @@ import com.nullroute.vpn.DnsVpnService
 class MainActivity : ComponentActivity() {
 
     private lateinit var billingManager: BillingManager
+    private lateinit var repository: com.nullroute.data.BlocklistRepository
+    private lateinit var viewModel: MainViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.nullroute.vpn.DnsTelemetryTracker.init(applicationContext)
 
         billingManager = BillingManager(applicationContext, lifecycleScope)
+        repository = SharedPreferencesBlocklistRepository(applicationContext)
+        val factory = MainViewModelFactory(repository, billingManager)
+        viewModel = androidx.lifecycle.ViewModelProvider(this, factory)[MainViewModel::class.java]
 
         // Clear bypass protection preference in release/final version to enforce strict locking
         val isDebuggable = (applicationContext.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -75,15 +81,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Process any import or restore intent extras
+        handleImportIntent(intent)
+
         // Check if we were launched due to a blocked settings/uninstall attempt
         val isBlockedAttempt = intent.getBooleanExtra("BLOCKED_ATTEMPT", false)
 
         setContent {
             NullRouteTheme {
-                val repository = remember { SharedPreferencesBlocklistRepository(applicationContext) }
-                val factory = remember { MainViewModelFactory(repository, billingManager) }
-                val viewModel: MainViewModel = viewModel(factory = factory)
-
                 MainScreen(viewModel, isBlockedAttempt)
             }
         }
@@ -91,9 +96,43 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        handleImportIntent(intent)
         val isBlockedAttempt = intent.getBooleanExtra("BLOCKED_ATTEMPT", false)
         if (isBlockedAttempt) {
             Toast.makeText(this, "Self-sabotage blocked! Focus mode is active.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun handleImportIntent(intent: Intent?) {
+        if (intent == null) return
+
+        val force = intent.getBooleanExtra("FORCE", false)
+        val importContent = intent.getStringExtra("IMPORT_DOMAINS")
+            ?: intent.getStringExtra("RESTORE_DOMAINS")
+
+        if (!importContent.isNullOrBlank()) {
+            val count = viewModel.restoreFromText(importContent, force = force)
+            if (count > 0) {
+                Toast.makeText(this, "Imported $count domains!", Toast.LENGTH_LONG).show()
+                if (viewModel.isVpnActive.value) {
+                    startService(Intent(this, DnsVpnService::class.java))
+                }
+            }
+        }
+
+        val autoRestore = intent.getBooleanExtra("AUTO_RESTORE_BACKUP", false)
+        if (autoRestore) {
+            val restored = com.nullroute.data.ExternalBlocklistBackupHelper.loadBackup(this, viewModel.isPro.value || force)
+            if (!restored.isNullOrEmpty()) {
+                val count = viewModel.restoreDomains(restored, force = force)
+                if (count > 0) {
+                    Toast.makeText(this, "Restored $count domains from backup!", Toast.LENGTH_LONG).show()
+                    if (viewModel.isVpnActive.value) {
+                        startService(Intent(this, DnsVpnService::class.java))
+                    }
+                }
+            }
         }
     }
 
@@ -172,6 +211,26 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
             viewModel.refreshStates(context)
         } else {
             Toast.makeText(context, "VPN Permission Denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // SAF Document Picker Launcher for restoring blocklist from external backup
+    val restoreFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.restoreFromUri(context, uri) { count ->
+                if (count > 0) {
+                    Toast.makeText(context, "Restored $count domains from backup!", Toast.LENGTH_SHORT).show()
+                    if (isVpnActive) {
+                        context.startService(Intent(context, DnsVpnService::class.java))
+                    }
+                } else if (count == 0) {
+                    Toast.makeText(context, "No new valid domains found in selected file", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Failed to read backup file", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -876,6 +935,12 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         val clip = ClipData.newPlainText("NullRoute Telemetry Report", report)
                         clipboard.setPrimaryClip(clip)
                         Toast.makeText(context, "Telemetry report copied to clipboard!", Toast.LENGTH_SHORT).show()
+                    },
+                    onRestoreBackup = {
+                        restoreFileLauncher.launch(arrayOf("text/*", "application/json", "*/*"))
+                    },
+                    onExportBackup = {
+                        shareBlocklistBackup(context, blockedDomains)
                     }
                 )
             }
@@ -1033,7 +1098,9 @@ fun getAppVersion(context: Context): String {
 fun DiagnosticsCard(
     telemetry: com.nullroute.vpn.TelemetrySnapshot,
     onShareLogs: () -> Unit,
-    onCopyReport: () -> Unit
+    onCopyReport: () -> Unit,
+    onRestoreBackup: () -> Unit,
+    onExportBackup: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -1157,8 +1224,52 @@ fun DiagnosticsCard(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Copy Diagnostic Text Report", fontSize = 13.sp)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Blocklist Backup / Restore buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onRestoreBackup,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.SettingsBackupRestore, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Restore File", fontSize = 12.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = onExportBackup,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Export Backup", fontSize = 12.sp)
+                    }
+                }
             }
         }
+    }
+}
+
+fun shareBlocklistBackup(context: Context, domains: List<BlockedDomain>) {
+    if (domains.isEmpty()) {
+        Toast.makeText(context, "No domains in blocklist to export", Toast.LENGTH_SHORT).show()
+        return
+    }
+    try {
+        val txtContent = com.nullroute.data.ExternalBlocklistBackupHelper.serializeToTxt(domains)
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "NullRoute Blocklist Backup")
+            putExtra(Intent.EXTRA_TEXT, txtContent)
+        }
+        context.startActivity(Intent.createChooser(sendIntent, "Export Blocklist Backup"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Failed to share blocklist", Toast.LENGTH_SHORT).show()
     }
 }
 
