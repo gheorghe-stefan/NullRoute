@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -31,6 +33,7 @@ class DnsVpnService : VpnService() {
 
     companion object {
         private const val TAG = "NullRouteVPN"
+        const val ACTION_STOP_VPN = "com.nullroute.ACTION_STOP_VPN"
         private const val MIN_CACHE_TTL_MS = 300_000L    // Minimum 300 seconds (5 minutes) TTL floor for mobile background traffic
         private const val MAX_CACHE_TTL_MS = 3600_000L   // Maximum 1 hour
         private const val NEGATIVE_CACHE_TTL_MS = 60_000L // 60s for NODATA / empty answers
@@ -58,7 +61,9 @@ class DnsVpnService : VpnService() {
     }
 
     @Volatile
-    private var upstreamServers: List<InetAddress> = listOf(
+    private var networkDnsServers: List<InetAddress> = emptyList()
+
+    private val fallbackPublicServers: List<InetAddress> = listOf(
         SECONDARY_UPSTREAM_V4, // Cloudflare 1.1.1.1 (Lowest global latency)
         PRIMARY_UPSTREAM_V4,   // Google 8.8.8.8
         TERTIARY_UPSTREAM_V4   // Quad9 9.9.9.9
@@ -122,6 +127,11 @@ class DnsVpnService : VpnService() {
     private lateinit var repository: BlocklistRepository
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val physicalNetworks = ConcurrentHashMap<Network, NetworkCapabilities>()
+    private val physicalLinkProperties = ConcurrentHashMap<Network, LinkProperties>()
+
+    @Volatile
+    private var activePhysicalNetwork: Network? = null
 
     @Volatile
     private var forwardingSocket: DatagramSocket? = null
@@ -140,6 +150,19 @@ class DnsVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP_VPN) {
+            Log.i(TAG, "Received ACTION_STOP_VPN, pausing VPN service cleanly")
+            VpnStateTracker.isRunning.value = false
+            cleanup()
+            vpnLoopThread?.interrupt()
+            vpnLoopThread = null
+            receiverThread?.interrupt()
+            receiverThread = null
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         Log.i(TAG, "VPN Service Starting")
         reloadBlockedDomainsCache()
 
@@ -185,27 +208,28 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun updateDynamicUpstreamDns(network: Network?) {
+    private fun updateDynamicUpstreamDns(network: Network?, lpOverride: LinkProperties? = null) {
         try {
             val cm = connectivityManager ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            val targetNetwork = network ?: cm?.activeNetwork
-            val lp = if (targetNetwork != null) cm?.getLinkProperties(targetNetwork) else null
+            val targetNetwork = network ?: activePhysicalNetwork ?: cm?.activeNetwork
+            val lp = lpOverride
+                ?: (if (targetNetwork != null) physicalLinkProperties[targetNetwork] ?: cm?.getLinkProperties(targetNetwork) else null)
             val dnsList = lp?.dnsServers ?: emptyList()
 
-            val validUpstreams = mutableListOf<InetAddress>()
-            // 1. Add Network's native DNS servers first (e.g. Wi-Fi router / Carrier DNS for lowest latency and local names)
+            val validLocalDns = mutableListOf<InetAddress>()
             for (dns in dnsList) {
-                if (dns is java.net.Inet4Address && !validUpstreams.contains(dns)) {
-                    validUpstreams.add(dns)
+                if (dns is java.net.Inet4Address && !validLocalDns.contains(dns)) {
+                    validLocalDns.add(dns)
                 }
             }
-            // 2. Add ultra-fast reliable public fallbacks
-            if (!validUpstreams.contains(SECONDARY_UPSTREAM_V4)) validUpstreams.add(SECONDARY_UPSTREAM_V4) // Cloudflare 1.1.1.1
-            if (!validUpstreams.contains(PRIMARY_UPSTREAM_V4)) validUpstreams.add(PRIMARY_UPSTREAM_V4)     // Google 8.8.8.8
-            if (!validUpstreams.contains(TERTIARY_UPSTREAM_V4)) validUpstreams.add(TERTIARY_UPSTREAM_V4)   // Quad9 9.9.9.9
 
-            upstreamServers = validUpstreams
-            Log.i(TAG, "Updated dynamic upstream DNS servers: ${upstreamServers.joinToString { it.hostAddress ?: "" }}")
+            networkDnsServers = validLocalDns
+            Log.i(
+                TAG,
+                "Updated network DNS servers (${targetNetwork ?: "none"}): " +
+                    if (validLocalDns.isEmpty()) "none (using public fallbacks)"
+                    else validLocalDns.joinToString { it.hostAddress ?: "" }
+            )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update dynamic upstream DNS", e)
         }
@@ -225,38 +249,108 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun selectBestPhysicalNetwork(): Network? {
+        var bestWifi: Network? = null
+        var bestWifiValidated = false
+        var bestCellular: Network? = null
+        var bestCellularValidated = false
+        var fallbackOther: Network? = null
+
+        for ((net, caps) in physicalNetworks) {
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) continue
+            val isValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                if (bestWifi == null || (isValidated && !bestWifiValidated)) {
+                    bestWifi = net
+                    bestWifiValidated = isValidated
+                }
+            } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                if (bestCellular == null || (isValidated && !bestCellularValidated)) {
+                    bestCellular = net
+                    bestCellularValidated = isValidated
+                }
+            } else if (fallbackOther == null) {
+                fallbackOther = net
+            }
+        }
+
+        return bestWifi ?: bestCellular ?: fallbackOther
+    }
+
+    @Synchronized
+    private fun refreshActivePhysicalNetwork(forceSocketRebuild: Boolean = false) {
+        val best = selectBestPhysicalNetwork()
+        val changed = best != activePhysicalNetwork
+        if (changed) {
+            activePhysicalNetwork = best
+            dnsResponseCache.clear()
+            Log.i(TAG, "Physical network switched to: $best (cleared DNS cache)")
+        }
+
+        updateDynamicUpstreamDns(best)
+        if (changed || forceSocketRebuild || forwardingSocket == null || forwardingSocket?.isClosed == true) {
+            rebuildForwardingSocket(best)
+        }
+        if (changed) {
+            updateUnderlyingNetworks(best)
+        }
+    }
+
     private fun registerNetworkCallback() {
         try {
             connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    Log.i(TAG, "Network switched/available: recreating protected upstream socket for $network")
-                    updateDynamicUpstreamDns(network)
-                    rebuildForwardingSocket(network)
-                    updateUnderlyingNetworks(network)
+                    val caps = connectivityManager?.getNetworkCapabilities(network)
+                    if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                        physicalNetworks[network] = caps
+                        connectivityManager?.getLinkProperties(network)?.let { physicalLinkProperties[network] = it }
+                        Log.i(TAG, "Physical network available: $network")
+                        refreshActivePhysicalNetwork()
+                    }
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    // Refresh underlying network whenever capabilities change (e.g. Wi-Fi validation, unmetered status)
-                    updateUnderlyingNetworks(network)
+                    if (!networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return
+                    physicalNetworks[network] = networkCapabilities
+                    refreshActivePhysicalNetwork()
                 }
 
-                override fun onLinkPropertiesChanged(network: Network, linkProperties: android.net.LinkProperties) {
-                    updateDynamicUpstreamDns(network)
-                    updateUnderlyingNetworks(network)
+                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                    if (!physicalNetworks.containsKey(network)) return
+                    physicalLinkProperties[network] = linkProperties
+                    if (network == activePhysicalNetwork) {
+                        updateDynamicUpstreamDns(network, linkProperties)
+                    } else {
+                        refreshActivePhysicalNetwork()
+                    }
                 }
 
                 override fun onLost(network: Network) {
-                    Log.i(TAG, "Network lost: resetting upstream socket")
-                    updateDynamicUpstreamDns(null)
-                    rebuildForwardingSocket()
-                    updateUnderlyingNetworks(connectivityManager?.activeNetwork)
+                    physicalNetworks.remove(network)
+                    physicalLinkProperties.remove(network)
+                    Log.i(TAG, "Physical network lost: $network")
+                    if (network == activePhysicalNetwork) {
+                        refreshActivePhysicalNetwork(forceSocketRebuild = true)
+                    }
                 }
             }
-            connectivityManager?.registerDefaultNetworkCallback(networkCallback!!)
+
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            connectivityManager?.registerNetworkCallback(request, networkCallback!!)
+
             val currentActive = connectivityManager?.activeNetwork
-            updateDynamicUpstreamDns(currentActive)
-            updateUnderlyingNetworks(currentActive)
+            val currentCaps = if (currentActive != null) connectivityManager?.getNetworkCapabilities(currentActive) else null
+            if (currentActive != null && currentCaps != null && currentCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                physicalNetworks[currentActive] = currentCaps
+                connectivityManager?.getLinkProperties(currentActive)?.let { physicalLinkProperties[currentActive] = it }
+                activePhysicalNetwork = currentActive
+            }
+            updateDynamicUpstreamDns(activePhysicalNetwork)
+            updateUnderlyingNetworks(activePhysicalNetwork)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register NetworkCallback", e)
         }
@@ -269,6 +363,9 @@ class DnsVpnService : VpnService() {
             // Ignore
         }
         networkCallback = null
+        physicalNetworks.clear()
+        physicalLinkProperties.clear()
+        activePhysicalNetwork = null
     }
 
     @Volatile
@@ -517,14 +614,19 @@ class DnsVpnService : VpnService() {
             }
 
             // Bind current physical network to newly established VPN interface
-            updateUnderlyingNetworks(connectivityManager?.activeNetwork)
+            val initialPhysical = activePhysicalNetwork ?: selectBestPhysicalNetwork()
+            updateUnderlyingNetworks(initialPhysical)
 
             val inputStream = FileInputStream(vpnInterface!!.fileDescriptor)
             val outputStream = FileOutputStream(vpnInterface!!.fileDescriptor)
             vpnOutputStream = outputStream
 
-            // Initialize upstream socket and async receiver
-            getOrCreateForwardingSocket()
+            // Initialize upstream socket bound to physical network and async receiver
+            if (forwardingSocket == null || forwardingSocket?.isClosed == true) {
+                createProtectedSocket(initialPhysical)
+            } else {
+                ensureReceiverThreadRunning()
+            }
 
             val buffer = ByteArray(16384)
             Log.i(TAG, "VPN Interface established (blocking=true), starting packet read loop")
@@ -988,38 +1090,29 @@ class DnsVpnService : VpnService() {
             dnsQuery[0] = (upstreamTid.toInt() shr 8).toByte()
             dnsQuery[1] = (upstreamTid.toInt() and 0xFF).toByte()
 
-            val upstreams = upstreamServers
+            val localDns = networkDnsServers
             var sendSuccess = false
 
-            // Race primary dynamic upstream (local Wi-Fi / carrier DNS or 1.1.1.1) and secondary in parallel
-            val primary = upstreams.firstOrNull() ?: SECONDARY_UPSTREAM_V4
-            try {
-                val p1 = DatagramPacket(dnsQuery, dnsLen, primary, 53)
-                socket.send(p1)
-                sendSuccess = true
-            } catch (e: IOException) {
-                // Secondary will attempt
-            }
-
-            val secondary = if (upstreams.size > 1) upstreams[1] else PRIMARY_UPSTREAM_V4
-            if (secondary != primary) {
-                try {
-                    val p2 = DatagramPacket(dnsQuery, dnsLen, secondary, 53)
-                    socket.send(p2)
-                    sendSuccess = true
-                } catch (e: IOException) {
-                    // Ignore
+            if (localDns.isNotEmpty()) {
+                // Use the active network's own DNS servers (essential on corporate/enterprise Wi-Fi
+                // where external port 53 is blocked or split-horizon internal DNS is used).
+                // Do NOT race 1.1.1.1 in parallel against local DHCP DNS.
+                for (i in 0 until minOf(2, localDns.size)) {
+                    try {
+                        socket.send(DatagramPacket(dnsQuery, dnsLen, localDns[i], 53))
+                        sendSuccess = true
+                    } catch (e: IOException) {
+                        // Try next local DNS server or fall back below
+                    }
                 }
             }
 
             if (!sendSuccess) {
-                // Fallback to remaining upstreams if top two failed
-                for (i in 2 until upstreams.size) {
+                // Fallback to public resolvers only if network DNS is absent or failed to send
+                for (i in 0 until minOf(2, fallbackPublicServers.size)) {
                     try {
-                        val fallback = DatagramPacket(dnsQuery, dnsLen, upstreams[i], 53)
-                        socket.send(fallback)
+                        socket.send(DatagramPacket(dnsQuery, dnsLen, fallbackPublicServers[i], 53))
                         sendSuccess = true
-                        break
                     } catch (e: IOException) {
                         // Continue
                     }

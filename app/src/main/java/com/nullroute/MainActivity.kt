@@ -186,6 +186,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
     var showProDialog by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
     var domainToLockPermanently by remember { mutableStateOf<String?>(null) }
+    var showIrreversibleWarning by remember { mutableStateOf(false) }
     var showAccessibilityDisclosure by remember { mutableStateOf(false) }
 
     // Listen for billing event messages (purchases, errors, debug toggle)
@@ -234,9 +235,11 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         }
     }
 
-    // Auto-prompt VPN permission on app launch if not active
+    // Auto-prompt VPN permission on app launch if not active and not explicitly paused
     LaunchedEffect(Unit) {
-        if (!viewModel.isVpnActive.value) {
+        val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
+        val isPaused = prefs.getBoolean("is_vpn_paused", false)
+        if (!viewModel.isVpnActive.value && (!isPaused || viewModel.isAccessibilityActive.value)) {
             val prepareIntent = VpnService.prepare(context)
             if (prepareIntent != null) {
                 vpnLauncher.launch(prepareIntent)
@@ -530,6 +533,40 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
         )
     }
 
+    if (showIrreversibleWarning) {
+        AlertDialog(
+            onDismissRequest = { showIrreversibleWarning = false },
+            title = {
+                Text(
+                    text = "⚠️ Irreversible Protection",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "Once Uninstall Protection is turned on, it cannot be disabled and NullRoute cannot be uninstalled (unless you boot into Android Safe Mode).\n\nAre you sure you want to enable it?",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showIrreversibleWarning = false
+                        showAccessibilityDisclosure = true
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B))
+                ) {
+                    Text("Yes", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showIrreversibleWarning = false }) {
+                    Text("No")
+                }
+            }
+        )
+    }
+
     if (showAccessibilityDisclosure) {
         AlertDialog(
             onDismissRequest = { showAccessibilityDisclosure = false },
@@ -677,7 +714,11 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (isVpnActive && isAccessibilityActive) "Full Protection Enabled 🛡️" else "Setup Required",
+                            text = when {
+                                isVpnActive && isAccessibilityActive -> "Production Mode: Full Protection 🛡️"
+                                !isVpnActive -> "Paused — Internet Unfiltered"
+                                else -> "Blocker Active (Uninstall Protection Off)"
+                            },
                             fontSize = 14.sp,
                             color = if (isVpnActive && isAccessibilityActive) Color(0xFF10B981) else Color(0xFFF59E0B)
                         )
@@ -695,7 +736,7 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                 )
             }
 
-            // VPN Service card
+            // VPN Service card (On/Off pause allowed only while Uninstall Protection is not enabled)
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -711,30 +752,44 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("1. System Blocker (VPN)", fontWeight = FontWeight.SemiBold)
                             Text(
-                                text = if (isVpnActive) "Running" else "Not Running",
+                                text = when {
+                                    isVpnActive && isAccessibilityActive -> "Running (Locked in Production Mode)"
+                                    isVpnActive -> "Running"
+                                    else -> "Paused (Direct Internet)"
+                                },
                                 fontSize = 12.sp,
-                                color = if (isVpnActive) Color(0xFF10B981) else Color(0xFFEF4444)
+                                color = if (isVpnActive) Color(0xFF10B981) else Color(0xFFF59E0B)
                             )
                         }
-                        Button(
-                            onClick = {
-                                val prepareIntent = VpnService.prepare(context)
-                                if (prepareIntent != null) {
-                                    vpnLauncher.launch(prepareIntent)
-                                } else {
-                                    context.startService(Intent(context, DnsVpnService::class.java))
+                        Switch(
+                            checked = isVpnActive,
+                            enabled = !isAccessibilityActive,
+                            onCheckedChange = { shouldEnable ->
+                                val prefs = context.getSharedPreferences("nullroute_prefs", Context.MODE_PRIVATE)
+                                if (shouldEnable) {
+                                    prefs.edit().putBoolean("is_vpn_paused", false).apply()
+                                    val prepareIntent = VpnService.prepare(context)
+                                    if (prepareIntent != null) {
+                                        vpnLauncher.launch(prepareIntent)
+                                    } else {
+                                        context.startService(Intent(context, DnsVpnService::class.java))
+                                        viewModel.refreshStates(context)
+                                    }
+                                } else if (!isAccessibilityActive) {
+                                    prefs.edit().putBoolean("is_vpn_paused", true).apply()
+                                    val stopIntent = Intent(context, DnsVpnService::class.java).apply {
+                                        action = DnsVpnService.ACTION_STOP_VPN
+                                    }
+                                    context.startService(stopIntent)
                                     viewModel.refreshStates(context)
                                 }
-                            },
-                            enabled = !isVpnActive
-                        ) {
-                            Text(if (isVpnActive) "Active" else "Enable")
-                        }
+                            }
+                        )
                     }
                 }
             }
 
-            // Accessibility Blocker card
+            // Accessibility Blocker card (Disabled while NullRoute is paused)
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -748,21 +803,34 @@ fun MainScreen(viewModel: MainViewModel, initialBlockedAttempt: Boolean) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("2. Uninstall Protection", fontWeight = FontWeight.SemiBold)
                             Text(
-                                text = if (isAccessibilityActive) "Protected" else "Unprotected",
+                                text = "2. Uninstall Protection",
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isVpnActive || isAccessibilityActive) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            )
+                            Text(
+                                text = when {
+                                    isAccessibilityActive -> "Protected (Production Mode)"
+                                    !isVpnActive -> "Disabled while NullRoute is paused"
+                                    else -> "Unprotected"
+                                },
                                 fontSize = 12.sp,
-                                color = if (isAccessibilityActive) Color(0xFF10B981) else Color(0xFFEF4444)
+                                color = when {
+                                    isAccessibilityActive -> Color(0xFF10B981)
+                                    !isVpnActive -> Color.Gray
+                                    else -> Color(0xFFEF4444)
+                                }
                             )
                         }
-                        Button(
-                            onClick = {
-                                showAccessibilityDisclosure = true
-                            },
-                            enabled = !isAccessibilityActive
-                        ) {
-                            Text(if (isAccessibilityActive) "Active" else "Enable")
-                        }
+                        Switch(
+                            checked = isAccessibilityActive,
+                            enabled = !isAccessibilityActive && isVpnActive,
+                            onCheckedChange = { shouldEnable ->
+                                if (shouldEnable && !isAccessibilityActive && isVpnActive) {
+                                    showIrreversibleWarning = true
+                                }
+                            }
+                        )
                     }
                 }
             }
