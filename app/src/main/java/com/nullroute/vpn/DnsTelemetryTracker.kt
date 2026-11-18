@@ -91,6 +91,8 @@ object DnsTelemetryTracker {
     private val latencySamples = ConcurrentLinkedDeque<Long>()
     private val lockWaitSamples = ConcurrentLinkedDeque<Long>()
     private val queryTimestamps = ConcurrentLinkedDeque<Long>()
+    private val recentEvents = ConcurrentLinkedDeque<String>()
+    private const val MAX_RECENT_EVENTS = 50
 
     @Volatile
     private var peakQps: Double = 0.0
@@ -538,9 +540,27 @@ object DnsTelemetryTracker {
         sb.appendLine("  TUN Read IOErrors         : ${totalVpnReadErrors.get()}")
         sb.appendLine("  Upstream Responses Recv   : ${totalUpstreamPacketsReceived.get()}")
         sb.appendLine("  Upstream Socket Errors    : ${totalUpstreamReceiveErrors.get()}")
+        val events = getRecentEvents()
+        if (events.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("[10] Recent Network & Error Events")
+            events.forEach { sb.appendLine("  $it") }
+        }
         sb.appendLine("=============================================")
         return sb.toString()
     }
+
+    fun recordEvent(event: String) {
+        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val entry = "[$ts] $event"
+        recentEvents.addLast(entry)
+        while (recentEvents.size > MAX_RECENT_EVENTS) {
+            recentEvents.pollFirst()
+        }
+        appendToLogFile(entry)
+    }
+
+    fun getRecentEvents(): List<String> = recentEvents.toList()
 
     private fun formatQType(qType: Int): String {
         return when (qType) {
