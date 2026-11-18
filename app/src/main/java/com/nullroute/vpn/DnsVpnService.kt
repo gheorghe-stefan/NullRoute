@@ -120,6 +120,7 @@ class DnsVpnService : VpnService() {
 
     private val inFlightQueries = ConcurrentHashMap<Short, InFlightQuery>()
     private val tidSequence = AtomicInteger(1)
+    private val consecutiveTimeouts = AtomicInteger(0)
 
     private val forwardExecutor = Executors.newCachedThreadPool()
     private var sweeperScheduler: ScheduledExecutorService? = null
@@ -208,8 +209,8 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun updateDynamicUpstreamDns(network: Network?, lpOverride: LinkProperties? = null) {
-        try {
+    private fun updateDynamicUpstreamDns(network: Network?, lpOverride: LinkProperties? = null): Boolean {
+        return try {
             val cm = connectivityManager ?: getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             val targetNetwork = network ?: activePhysicalNetwork ?: cm?.activeNetwork
             val lp = lpOverride
@@ -223,15 +224,20 @@ class DnsVpnService : VpnService() {
                 }
             }
 
-            networkDnsServers = validLocalDns
-            Log.i(
-                TAG,
-                "Updated network DNS servers (${targetNetwork ?: "none"}): " +
-                    if (validLocalDns.isEmpty()) "none (using public fallbacks)"
-                    else validLocalDns.joinToString { it.hostAddress ?: "" }
-            )
+            val changed = validLocalDns != networkDnsServers
+            if (changed) {
+                networkDnsServers = validLocalDns
+                Log.i(
+                    TAG,
+                    "Updated network DNS servers (${targetNetwork ?: "none"}): " +
+                        if (validLocalDns.isEmpty()) "none (using public fallbacks)"
+                        else validLocalDns.joinToString { it.hostAddress ?: "" }
+                )
+            }
+            changed
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update dynamic upstream DNS", e)
+            false
         }
     }
 
@@ -320,7 +326,11 @@ class DnsVpnService : VpnService() {
                     if (!physicalNetworks.containsKey(network)) return
                     physicalLinkProperties[network] = linkProperties
                     if (network == activePhysicalNetwork) {
-                        updateDynamicUpstreamDns(network, linkProperties)
+                        val dnsChanged = updateDynamicUpstreamDns(network, linkProperties)
+                        if (dnsChanged) {
+                            // DHCP/provisioning just updated DNS servers; rebind socket so it uses the provisioned interface
+                            rebuildForwardingSocket(network)
+                        }
                     } else {
                         refreshActivePhysicalNetwork()
                     }
@@ -435,10 +445,18 @@ class DnsVpnService : VpnService() {
             // Send synthetic SERVFAIL so the client fails fast (<2s) rather than hanging for 10s
             sendServfailFast(query)
         }
+
+        if (expiredEntries.isNotEmpty() && consecutiveTimeouts.incrementAndGet() >= 2) {
+            consecutiveTimeouts.set(0)
+            val targetNet = activePhysicalNetwork ?: selectBestPhysicalNetwork()
+            Log.w(TAG, "Consecutive DNS timeouts detected; rebuilding upstream socket for $targetNet")
+            rebuildForwardingSocket(targetNet)
+        }
     }
 
     private fun sendServfailFast(query: InFlightQuery) {
         try {
+            Log.w(TAG, "Sending SERVFAIL for ${query.domain} (qType=${query.qType})")
             val servfailPayload = buildDnsErrorResponse(query.originalQuestionSection, query.clientTid, 2) // RCODE 2 = SERVFAIL
             val out = vpnOutputStream ?: return
 
@@ -715,6 +733,7 @@ class DnsVpnService : VpnService() {
 
                 val length = packet.length
                 if (length < 12) continue
+                consecutiveTimeouts.set(0)
                 DnsTelemetryTracker.recordUpstreamPacketReceived()
 
                 val upstreamTid = getShort(recvBuffer, 0).toShort()
@@ -769,6 +788,7 @@ class DnsVpnService : VpnService() {
                 }
             } catch (e: Exception) {
                 if (Thread.currentThread().isInterrupted || !VpnStateTracker.isRunning.value) break
+                Log.w(TAG, "Upstream receive error: ${e.message}")
                 DnsTelemetryTracker.recordUpstreamReceiveError()
                 // If socket closed or network switched, sleep briefly to avoid 100% CPU busy-spin
                 try {
@@ -1102,7 +1122,7 @@ class DnsVpnService : VpnService() {
                         socket.send(DatagramPacket(dnsQuery, dnsLen, localDns[i], 53))
                         sendSuccess = true
                     } catch (e: IOException) {
-                        // Try next local DNS server or fall back below
+                        Log.w(TAG, "Failed sending DNS for ${query.domain} to local DNS ${localDns[i].hostAddress}: ${e.message}")
                     }
                 }
             }
@@ -1114,7 +1134,7 @@ class DnsVpnService : VpnService() {
                         socket.send(DatagramPacket(dnsQuery, dnsLen, fallbackPublicServers[i], 53))
                         sendSuccess = true
                     } catch (e: IOException) {
-                        // Continue
+                        Log.w(TAG, "Failed sending DNS for ${query.domain} to fallback ${fallbackPublicServers[i].hostAddress}: ${e.message}")
                     }
                 }
             }
